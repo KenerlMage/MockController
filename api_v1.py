@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+import assistants
 import constants_export
 import tps_store
 
@@ -40,6 +41,7 @@ def health() -> dict:
         "service": "MockController",
         "api": "v1",
         "tps": tps_store.stats(),
+        "assistants": assistants.stats(),
     }
 
 

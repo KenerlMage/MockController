@@ -56,6 +56,14 @@ try:
 except Exception as exc:  # noqa: BLE001
     print(f"[warn] 元数据模块未挂载: {exc}")
 
+# ---- 装备助手货架（自 Runner 迁入，路由 /api/v1/assistants*）----
+try:
+    import assistants as assistants_mod  # noqa: E402
+
+    assistants_mod.register_routes(app, REPO_ROOT)
+except Exception as exc:  # noqa: BLE001
+    print(f"[warn] 装备助手货架模块未挂载: {exc}")
+
 # ---- 静态前端（controller-web 构建产物）----
 _WEB_DIST = Path(__file__).resolve().parent / "web_dist"
 if _WEB_DIST.is_dir():
