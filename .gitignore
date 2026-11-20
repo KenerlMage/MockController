@@ -1,0 +1,18 @@
+# ---- 杩愯鏃舵暟鎹紙鍖呬粨搴擄紝涓嶅叆搴擄級----
+repo/
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---- 鏃ュ織 / 涓存椂 ----
+*.log
+logs/
+.tmp/
+
+# ---- 前端依赖与构建 ----
+controller-web/node_modules/
+controller-web/dist/
+
