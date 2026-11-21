@@ -487,6 +487,8 @@ def _norm_bom_item(raw: dict) -> dict:
         "category": _text(raw.get("category"), 40),
         "role": _text(raw.get("role"), 160),
         "device_type": _text(raw.get("device_type"), 40) or _text(raw.get("category"), 40),
+        # 迁移前的历史设备键（如 tektronix-mso5），仅作追溯，不参与校验
+        "device_type_legacy": _text(raw.get("device_type_legacy"), 40),
         "programmable": bool(raw.get("programmable")),
         "interface": iface,
         "protocol": pick("protocol", limit=60),
