@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../api.js'
+import { store } from '../store.js'
 import TpsEditor from './TpsEditor.vue'
 
 const items = ref([])
@@ -9,6 +10,7 @@ const tps = ref(null)
 const files = ref([])
 const error = ref('')
 const message = ref('')
+const warnings = ref([])
 const loading = ref(false)
 
 const selectedSummary = computed(() => items.value.find((t) => t.id === selectedId.value) || null)
@@ -29,9 +31,11 @@ async function load() {
 
 async function open(id) {
   selectedId.value = id
+  store.tpsFocusId = id
   tps.value = null
   files.value = []
   error.value = ''
+  warnings.value = []
   try {
     const detail = await api.tpsGet(id)
     tps.value = detail.tps
@@ -45,11 +49,14 @@ async function open(id) {
 async function save(payload) {
   error.value = ''
   message.value = ''
+  warnings.value = []
   try {
-    await api.tpsSave(payload.id, payload)
+    const res = await api.tpsSave(payload.id, payload)
+    const warns = (res && res.warnings) || []
     message.value = `已保存 ${payload.id}，Runner 下次拉取即生效`
     await load()
     await open(payload.id)
+    warnings.value = warns
   } catch (e) {
     error.value = e.message
   }
@@ -92,7 +99,23 @@ async function importZip(event) {
   event.target.value = ''
 }
 
-onMounted(load)
+onMounted(async () => {
+  // 先记住外部要求选中的编号：load() 会自动打开首条，不能让它覆盖目标
+  const target = store.tpsFocusId
+  await load()
+  if (target) await open(target)
+})
+
+// 其他页签（元数据右键创建 TPS）请求选中某份清单
+watch(
+  () => store.tpsFocusToken,
+  async () => {
+    const target = store.tpsFocusId
+    if (!target) return
+    await load()
+    await open(target)
+  }
+)
 </script>
 
 <template>
@@ -137,7 +160,7 @@ onMounted(load)
       <div v-if="message" class="ok">{{ message }}</div>
 
       <div v-if="!tps" class="card muted">选择左侧 TPS 查看与编辑</div>
-      <TpsEditor v-else :tps="tps" :files="files" :summary="selectedSummary" @save="save" />
+      <TpsEditor v-else :tps="tps" :files="files" :summary="selectedSummary" :warnings="warnings" @save="save" />
     </section>
   </div>
 </template>

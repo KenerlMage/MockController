@@ -1,12 +1,13 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { api } from './api.js'
+import { store } from './store.js'
 import PackagesView from './views/PackagesView.vue'
 import TpsView from './views/TpsView.vue'
 import MetadataView from './views/MetadataView.vue'
+import ProcessesView from './views/ProcessesView.vue'
 import ConstantsView from './views/ConstantsView.vue'
 
-const tab = ref('tps')
 const health = ref(null)
 const error = ref('')
 
@@ -15,10 +16,11 @@ const tabs = [
   { id: 'tps', icon: '▤', name: 'TPS 管理', desc: '清单 · 部署 · 常数绑定', code: 'TPS' },
   { id: 'packages', icon: '▣', name: '软件包', desc: '归档 · 版本 · 探测', code: 'PKG' },
   { id: 'metadata', icon: '◈', name: '元数据', desc: '装备树 · 测试台 BOM', code: 'MDA' },
+  { id: 'processes', icon: '▦', name: '工序', desc: '工序清单 · 与装备树同级', code: 'PRC' },
   { id: 'constants', icon: '≡', name: '机器常数', desc: '版本 · 模型 · 标定值', code: 'CST' }
 ]
 
-const current = computed(() => tabs.find((t) => t.id === tab.value))
+const current = computed(() => tabs.find((t) => t.id === store.tab))
 
 onMounted(async () => {
   try {
@@ -60,8 +62,8 @@ onMounted(async () => {
           v-for="t in tabs"
           :key="t.id"
           class="side-item"
-          :class="{ active: tab === t.id }"
-          @click="tab = t.id"
+          :class="{ active: store.tab === t.id }"
+          @click="store.switchTab(t.id)"
         >
           <span class="side-icon">{{ t.icon }}</span>
           <span class="side-body">
@@ -87,10 +89,11 @@ onMounted(async () => {
 
       <div v-if="error" class="error">{{ error }}</div>
 
-      <TpsView v-if="tab === 'tps'" />
-      <PackagesView v-else-if="tab === 'packages'" />
-      <MetadataView v-else-if="tab === 'metadata'" />
-      <ConstantsView v-else-if="tab === 'constants'" />
+      <TpsView v-if="store.tab === 'tps'" />
+      <PackagesView v-else-if="store.tab === 'packages'" />
+      <MetadataView v-else-if="store.tab === 'metadata'" />
+      <ProcessesView v-else-if="store.tab === 'processes'" />
+      <ConstantsView v-else-if="store.tab === 'constants'" />
     </main>
   </div>
 </template>

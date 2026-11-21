@@ -1,9 +1,11 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api.js'
+import { store } from '../store.js'
 import { loadBomTemplates } from '../metadataOptions.js'
 import NewPresetDialog from '../components/NewPresetDialog.vue'
 import BomEditorDialog from '../components/BomEditorDialog.vue'
+import CreateTpsDialog from '../components/CreateTpsDialog.vue'
 
 const tree = ref([])
 const overview = ref(null)
@@ -17,6 +19,51 @@ const showBomEditor = ref(false)
 const deviceTypes = ref([])
 const resourceTemplates = ref([])
 const templateSource = ref('')
+
+// 右键菜单：记录菜单位置与所属节点（产品/子系统需从父节点带入）
+const menu = ref(null)
+const createContext = ref(null)
+const showCreateTps = ref(false)
+
+const MENU_WIDTH = 176
+const MENU_HEIGHT = 92
+
+function openMenu(event, preset, product, subsystem) {
+  const x = Math.min(event.clientX, Math.max(8, window.innerWidth - MENU_WIDTH - 8))
+  const y = Math.min(event.clientY, Math.max(8, window.innerHeight - MENU_HEIGHT - 8))
+  menu.value = { x, y, preset, product, subsystem }
+}
+
+function closeMenu() {
+  menu.value = null
+}
+
+function menuCreate() {
+  const ctx = menu.value
+  if (!ctx) return
+  createContext.value = { preset: ctx.preset, product: ctx.product, subsystem: ctx.subsystem }
+  showCreateTps.value = true
+  closeMenu()
+}
+
+function menuBom() {
+  const ctx = menu.value
+  if (!ctx) return
+  closeMenu()
+  openBom(ctx.preset)
+}
+
+function onTpsCreated(res) {
+  showCreateTps.value = false
+  const id = (res && res.tps && res.tps.id) || ''
+  if (!id) {
+    error.value = '后端未返回新 TPS 编号'
+    return
+  }
+  notice.value = `已创建 TPS ${id}`
+  createContext.value = null
+  store.focusTps(id)
+}
 
 const presetsOf = (sub) => sub.presets || sub.preset_types || []
 
@@ -139,7 +186,9 @@ onMounted(load)
             :key="t.id"
             class="type"
             :class="{ on: selected && selected.id === t.id }"
+            title="右键：创建 TPS / 查看 BOM"
             @click="openBom(t)"
+            @contextmenu.prevent="openMenu($event, t, p, s)"
           >
             <span class="mono">{{ t.id }}</span>
             <span>{{ t.name }}</span>
@@ -193,6 +242,28 @@ onMounted(load)
     @close="showBomEditor = false"
     @saved="onBomSaved"
   />
+
+  <CreateTpsDialog
+    v-if="showCreateTps && createContext"
+    :preset="createContext.preset"
+    :product="createContext.product"
+    :subsystem="createContext.subsystem"
+    @close="showCreateTps = false"
+    @created="onTpsCreated"
+  />
+
+  <div
+    v-if="menu"
+    class="ctx-layer"
+    @mousedown.self="closeMenu"
+    @contextmenu.prevent.self="closeMenu"
+  >
+    <div class="ctx-menu" :style="{ left: `${menu.x}px`, top: `${menu.y}px` }">
+      <div class="ctx-title mono">{{ menu.preset.id }}</div>
+      <button @click="menuCreate">创建 TPS</button>
+      <button @click="menuBom">查看 BOM</button>
+    </div>
+  </div>
 </template>
 
 <style scoped>
@@ -273,5 +344,51 @@ h2 {
 .mono {
   font-family: var(--mono);
   font-size: 12px;
+}
+
+/* 右键菜单 */
+.ctx-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+}
+
+.ctx-menu {
+  position: fixed;
+  width: 168px;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(var(--accent-rgb), 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ctx-title {
+  padding: 5px 9px 6px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-menu button {
+  justify-content: flex-start;
+  border: 0;
+  border-radius: 5px;
+  padding: 7px 10px;
+  font-size: 13px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.ctx-menu button:hover:not(:disabled) {
+  background: var(--panel-2);
+  color: var(--accent);
+  box-shadow: none;
 }
 </style>
