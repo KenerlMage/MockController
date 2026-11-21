@@ -34,6 +34,15 @@
   POST   /api/metadata/presets/{id}/bom/items                    追加一台设备
   DELETE /api/metadata/presets/{id}/bom/items/{device_id}        删除一台设备
   GET    /api/metadata/device-catalog                            可复用设备模板库 (按型号去重)
+  GET    /api/metadata/device-templates                          设备类型清单 + 资源描述符模板 (BOM 三要素)
+
+BOM 条目三要素 (兼容扩展, 旧字段全部保留):
+  alias        设备别名, 1-40 字符, 允许字母/数字/_.-; 未提供时回退 name
+  device_type  设备类型 (清单见 metadata_templates.DEVICE_TYPES, 中文名或 key 均可);
+               未提供时回退旧字段 category; 不在清单内只提示不阻断
+  resource     资源描述符 (VISA 地址 / COM 口 / 自定义描述), 最长 200, 可为空;
+               非空时由 _norm_bom_item 解析出 interface / host / port / 串口号 / 地址并回填,
+               显式填写的字段优先, 不被覆盖
 
 挂载方式 (在 main.py 末尾):
   import metadata_registry
@@ -53,6 +62,8 @@ from typing import Any, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from metadata_templates import DEVICE_TYPES, KNOWN_DEVICE_TYPES, RESOURCE_TEMPLATES
+
 # ---------------- 常量 ----------------
 
 # 节点 ID: 字母/数字开头, 允许 . _ - (与既有预设 ID 风格一致, 如 PB-PWR-01)
@@ -60,13 +71,17 @@ ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$")
 PRODUCT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 SUBSYSTEM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 
-NET_INTERFACES = {"LAN", "ETHERNET", "TCP", "IP"}
+# SOCKET = raw socket (TCPIP0::host::port::SOCKET / host:port), 归入网络类参与 host/port 校验
+NET_INTERFACES = {"LAN", "ETHERNET", "TCP", "IP", "SOCKET"}
 SERIAL_INTERFACES = {"SERIAL", "RS232", "RS485", "UART", "COM"}
 PASSIVE_INTERFACES = {"USB", "GPIB", "NONE", "MANUAL", ""}
 ALL_INTERFACES = NET_INTERFACES | SERIAL_INTERFACES | PASSIVE_INTERFACES
 
 HOST_RE = re.compile(r"^(?:(?:\d{1,3}\.){3}\d{1,3}|[A-Za-z0-9][A-Za-z0-9._-]{0,62})$")
-SERIAL_PORT_RE = re.compile(r"^(?:COM[0-9]{1,3}|/dev/tty[A-Za-z0-9._-]{1,40})$")
+# COM1 / ASRL3 (VISA 串口写法) / /dev/ttyUSB0
+SERIAL_PORT_RE = re.compile(r"^(?:COM[0-9]{1,3}|ASRL[0-9]{1,3}|/dev/tty[A-Za-z0-9._-]{1,40})$")
+# 设备别名: 字母/数字开头不限, 中间允许 _ . -
+ALIAS_RE = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
 
 _LOCK = threading.RLock()
 
@@ -356,44 +371,164 @@ def ensure_store(force: bool = False, mode: str = "merge") -> dict:
 # ---------------- BOM 设备条目归一化 ----------------
 
 
+def _parse_resource(resource: str) -> dict[str, Any]:
+    """把资源描述符解析成连接参数 (只返回解析出的键, 由调用方按「显式字段优先」回填)
+
+    支持写法 (大小写不敏感):
+      TCPIP0::192.168.1.10::5025::SOCKET     → interface=SOCKET / host / port / protocol=SCPI
+      TCPIP0::192.168.1.10::INSTR            → interface=LAN / host / protocol=SCPI
+      USB0::0x0699::0x0401::C010001::INSTR   → interface=USB / protocol=VISA / 原串做 default_address
+      GPIB0::12::INSTR                       → interface=GPIB / default_address=12
+      ASRL3::9600::INSTR / COM3:9600:8N1     → interface=SERIAL / 串口号 / 波特率
+      192.168.1.10:5025                      → interface=SOCKET / host / port
+      其他 (含中文自定义描述)                → interface=NONE, 原串保留在 resource 字段
+    """
+    res = _text(resource, 200)
+    if not res:
+        return {}
+    parts = res.split("::")
+    head = parts[0].strip().upper()
+
+    # --- VISA 的 "::" 分级写法 ---
+    if head.startswith("TCPIP") and len(parts) >= 3:
+        tail = parts[-1].strip().upper()
+        host = parts[1].strip()
+        if tail == "SOCKET":
+            out: dict[str, Any] = {"interface": "SOCKET", "protocol": "SCPI"}
+            if host:
+                out["default_host"] = host
+            if parts[2].strip().isdigit():
+                out["default_port"] = int(parts[2].strip())
+            return out
+        if tail == "INSTR":
+            out = {"interface": "LAN", "protocol": "SCPI"}
+            if host:
+                out["default_host"] = host
+            # TCPIP0::host::5025::INSTR 一并按 raw socket 处理
+            if len(parts) == 4 and parts[2].strip().isdigit():
+                out["interface"] = "SOCKET"
+                out["default_port"] = int(parts[2].strip())
+            return out
+        # 其他 TCPIP 后缀: 仍按 LAN 处理, 只取主机名
+        if host:
+            return {"interface": "LAN", "default_host": host, "protocol": "SCPI"}
+
+    if head.startswith("USB") and len(parts) >= 2:
+        return {"interface": "USB", "protocol": "VISA", "default_address": res}
+
+    if head.startswith("GPIB"):
+        out = {"interface": "GPIB"}
+        if len(parts) >= 2 and parts[1].strip():
+            out["default_address"] = parts[1].strip()
+        return out
+
+    if head.startswith("ASRL"):
+        out = {"interface": "SERIAL", "default_serial_port": parts[0].strip()}
+        if len(parts) >= 2 and parts[1].strip().isdigit():
+            out["default_baudrate"] = int(parts[1].strip())
+        return out
+
+    # --- 串口简写: COM3 / COM3:9600 / COM3:9600:8N1 ---
+    m = re.match(r"^(COM[0-9]{1,3})(?::([0-9]{3,7}))?(?::[0-9A-Za-z]+)?$", res, re.I)
+    if m:
+        out = {"interface": "SERIAL", "default_serial_port": m.group(1).upper()}
+        if m.group(2):
+            out["default_baudrate"] = int(m.group(2))
+        return out
+
+    if res.lower().startswith("/dev/tty"):
+        return {"interface": "SERIAL", "default_serial_port": res}
+
+    # --- 无前缀 host:port (网口 raw socket) ---
+    m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]{0,62}):([0-9]{1,5})$", res)
+    if m:
+        return {"interface": "SOCKET", "default_host": m.group(1), "default_port": int(m.group(2))}
+
+    return {"interface": "NONE"}
+
+
 def _norm_bom_item(raw: dict) -> dict:
-    iface = _text(raw.get("interface"), 24).upper() or "NONE"
+    name = _text(raw.get("name"), 80)
+    resource = _text(raw.get("resource"), 200)
+    parsed = _parse_resource(resource) if resource else {}
+
+    # 接口: 显式填写优先, 其次由 resource 解析, 最后回落 NONE
+    iface = _text(raw.get("interface"), 24).upper() or _text(parsed.get("interface"), 24) or "NONE"
     if iface not in ALL_INTERFACES:
         iface = iface or "NONE"
+
+    def pick(field: str, *legacy: str, limit: int = 120) -> str:
+        """显式字段 > 旧字段别名 > resource 解析结果"""
+        for key in (field, *legacy):
+            val = _text(raw.get(key), limit)
+            if val:
+                return val
+        return _text(parsed.get(field), limit)
+
+    def pick_int(field: str, *legacy: str) -> Optional[int]:
+        for key in (field, *legacy):
+            if raw.get(key) is not None and raw.get(key) != "":
+                val = _as_int(raw.get(key))
+                if val is not None:
+                    return val
+        return _as_int(parsed.get(field))
+
     dev_id = _text(raw.get("id"), 64)
     if not dev_id or not ID_RE.match(dev_id):
         dev_id = "dev-" + uuid.uuid4().hex[:8]
+    # 显式 alias 不做 40 字符截断, 交给校验报错; 由 name 回退时按 alias 上限收敛
+    alias = _text(raw.get("alias"), 64) or _text(name, 40)
     return {
         "id": dev_id,
-        "name": _text(raw.get("name"), 80),
+        "alias": alias,
+        "name": name,
         "model": _text(raw.get("model"), 80),
         "vendor": _text(raw.get("vendor"), 60),
         "category": _text(raw.get("category"), 40),
         "role": _text(raw.get("role"), 160),
-        "device_type": _text(raw.get("device_type"), 40),
+        "device_type": _text(raw.get("device_type"), 40) or _text(raw.get("category"), 40),
         "programmable": bool(raw.get("programmable")),
         "interface": iface,
-        "protocol": _text(raw.get("protocol"), 60),
-        "default_host": _text(raw.get("default_host") or raw.get("host"), 80),
-        "default_port": _as_int(raw.get("default_port") if raw.get("default_port") is not None else raw.get("port")),
-        "default_serial_port": _text(raw.get("default_serial_port") or raw.get("serial_port"), 40),
-        "default_baudrate": _as_int(
-            raw.get("default_baudrate") if raw.get("default_baudrate") is not None else raw.get("baudrate")
-        ),
-        "default_address": _text(raw.get("default_address") or raw.get("address"), 120),
+        "protocol": pick("protocol", limit=60),
+        "resource": resource,
+        "default_host": pick("default_host", "host", limit=80),
+        "default_port": pick_int("default_port", "port"),
+        "default_serial_port": pick("default_serial_port", "serial_port", limit=40),
+        "default_baudrate": pick_int("default_baudrate", "baudrate"),
+        "default_address": pick("default_address", "address", limit=120),
         "default_channel": _text(raw.get("default_channel") or raw.get("channel"), 24),
         "required": raw.get("required") is not False,
         "note": _text(raw.get("note"), 240),
     }
 
 
-def _validate_bom_item(item: dict, index: int) -> list[str]:
+def _validate_bom_item(item: dict, index: int, warnings: Optional[list[str]] = None) -> list[str]:
+    """BOM 条目校验。返回阻断性错误; warnings 收集不阻断的提示 (未知设备类型等)"""
     errs: list[str] = []
-    label = item.get("name") or item.get("model") or f"第 {index + 1} 行"
-    if not item.get("name"):
-        errs.append(f"{label}：设备名称不能为空")
-    if not item.get("model"):
-        errs.append(f"{label}：型号不能为空")
+    alias = item.get("alias") or ""
+    name = item.get("name") or ""
+    label = alias or name or item.get("model") or f"第 {index + 1} 行"
+
+    # 三要素: alias 必填 (可回退 name); alias 存在时不再强求 name / model
+    if not alias:
+        errs.append(f"{label}：设备别名不能为空（alias 与 name 至少填一项）")
+        if not item.get("model"):
+            errs.append(f"{label}：型号不能为空")
+    else:
+        if len(alias) > 40:
+            errs.append(f"{label}：设备别名最长 40 个字符")
+        # 别名由 name 回退而来时 (中文设备名) 不做字符集限制, 避免旧 BOM 无法保存
+        if alias != name and len(alias) <= 40 and not ALIAS_RE.match(alias):
+            errs.append(f"{label}：设备别名仅允许字母/数字/_.-（当前：{alias}）")
+
+    # device_type 必填 (可回退 category); 不在清单内只提示, 不阻断保存
+    dtype = _text(item.get("device_type"), 40)
+    if not dtype:
+        errs.append(f"{label}：设备类型不能为空（device_type 与 category 至少填一项）")
+    elif dtype not in KNOWN_DEVICE_TYPES and dtype.lower() != "other":
+        if warnings is not None:
+            warnings.append(f"{label}：未知设备类型「{dtype}」，已按自定义类型保存（不阻断）")
+
     iface = item.get("interface", "NONE")
     if iface in NET_INTERFACES:
         host = item.get("default_host") or ""
@@ -409,7 +544,7 @@ def _validate_bom_item(item: dict, index: int) -> list[str]:
     elif iface in SERIAL_INTERFACES:
         sp = item.get("default_serial_port") or ""
         if sp and not SERIAL_PORT_RE.match(sp):
-            errs.append(f"{label}：串口号格式非法 ({sp})，应为 COM1 或 /dev/ttyUSB0")
+            errs.append(f"{label}：串口号格式非法 ({sp})，应为 COM1 / ASRL3 / /dev/ttyUSB0")
         br = item.get("default_baudrate")
         if br is not None and not (300 <= int(br) <= 921600):
             errs.append(f"{label}：波特率需在 300-921600 之间")
@@ -765,6 +900,15 @@ def register_routes(app: FastAPI, base_dir: Path, tps_dir: Path) -> None:
         except Exception as e:
             return {"success": False, "message": f"读取设备模板库失败: {e}", "devices": []}
 
+    @app.get("/api/metadata/device-templates")
+    def metadata_device_templates():
+        """BOM 三要素选填清单: 设备类型 + 资源描述符模板 (供前端下拉与输入占位)"""
+        return {
+            "success": True,
+            "device_types": [dict(d) for d in DEVICE_TYPES],
+            "resource_templates": [dict(t) for t in RESOURCE_TEMPLATES],
+        }
+
     # ---------- 种子 / 导入 ----------
 
     @app.post("/api/metadata/reseed")
@@ -1096,8 +1240,9 @@ def register_routes(app: FastAPI, base_dir: Path, tps_dir: Path) -> None:
     def _save_bom_payload(pid: str, items_raw: list[dict], attributes: Optional[PresetTypeRequest]) -> dict:
         items = [_norm_bom_item(d) for d in items_raw if isinstance(d, dict)]
         errs = _dedupe_ids(items)
+        warns: list[str] = []
         for i, it in enumerate(items):
-            errs.extend(_validate_bom_item(it, i))
+            errs.extend(_validate_bom_item(it, i, warns))
         if errs:
             return {"success": False, "message": "；".join(errs[:8]), "errors": errs}
 
@@ -1129,6 +1274,7 @@ def register_routes(app: FastAPI, base_dir: Path, tps_dir: Path) -> None:
             "count": len(items),
             "programmable_count": prog,
             "items": items,
+            "warnings": warns,
             "bom_file": str(_bom_path(pid)),
         }
 
@@ -1160,6 +1306,7 @@ def register_routes(app: FastAPI, base_dir: Path, tps_dir: Path) -> None:
                 return {"success": False, "message": f"测试台类型不存在: {pid}"}
             items = _load_bom(pid)
             item = _norm_bom_item(req.item if isinstance(req.item, dict) else {})
+            warns: list[str] = []
             if any(x.get("id") == item["id"] for x in items):
                 item["id"] = "dev-" + uuid.uuid4().hex[:8]
             before = _text(req.before_id, 64)
@@ -1168,14 +1315,20 @@ def register_routes(app: FastAPI, base_dir: Path, tps_dir: Path) -> None:
                 items.insert(idx, item)
             else:
                 items.append(item)
-            errs = _validate_bom_item(item, len(items) - 1)
+            errs = _validate_bom_item(item, len(items) - 1, warns)
             if errs:
                 return {"success": False, "message": "；".join(errs), "errors": errs}
             _save_bom(pid, items)
             node["bom_count"] = len(items)
             node["updated_at"] = _now()
             _save_store(store)
-        return {"success": True, "message": f"已添加设备「{item['name'] or item['model']}」", "item": item, "count": len(items)}
+        return {
+            "success": True,
+            "message": f"已添加设备「{item['alias'] or item['name'] or item['model']}」",
+            "item": item,
+            "warnings": warns,
+            "count": len(items),
+        }
 
     @app.delete("/api/metadata/presets/{preset_id}/bom/items/{device_id}")
     def delete_bom_item(preset_id: str, device_id: str):

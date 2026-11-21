@@ -50,6 +50,32 @@ export const api = {
   metadataOverview: () => request('/api/metadata/overview'),
   bom: (presetId) => request(`/api/metadata/presets/${encodeURIComponent(presetId)}/bom`),
 
+  metadataSaveProduct: (payload) =>
+    request('/api/metadata/products', { method: 'POST', body: JSON.stringify(payload) }),
+  metadataSaveSubsystem: (payload) =>
+    request('/api/metadata/subsystems', { method: 'POST', body: JSON.stringify(payload) }),
+  metadataSavePreset: (payload) =>
+    request('/api/metadata/presets', { method: 'POST', body: JSON.stringify(payload) }),
+  metadataSaveBom: (presetId, items) =>
+    request(`/api/metadata/presets/${encodeURIComponent(presetId)}/bom`, {
+      method: 'PUT',
+      body: JSON.stringify({ items })
+    }),
+  metadataDeviceTemplates: () => request('/api/metadata/device-templates'),
+
+  metadataSaveProduct: (payload) =>
+    request('/api/metadata/products', { method: 'POST', body: JSON.stringify(payload) }),
+  metadataSaveSubsystem: (payload) =>
+    request('/api/metadata/subsystems', { method: 'POST', body: JSON.stringify(payload) }),
+  metadataSavePreset: (payload) =>
+    request('/api/metadata/presets', { method: 'POST', body: JSON.stringify(payload) }),
+  metadataSaveBom: (presetId, items) =>
+    request(`/api/metadata/presets/${encodeURIComponent(presetId)}/bom`, {
+      method: 'PUT',
+      body: JSON.stringify({ items })
+    }),
+  metadataDeviceTemplates: () => request('/api/metadata/device-templates'),
+
   constantsVersions: () => request('/api/constants/versions'),
   constantsModels: (pn, version) =>
     request(`/api/constants/models?pn=${encodeURIComponent(pn || '')}&version=${encodeURIComponent(version || '')}`)

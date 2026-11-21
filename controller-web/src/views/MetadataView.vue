@@ -1,12 +1,40 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api.js'
+import { loadBomTemplates } from '../metadataOptions.js'
+import NewPresetDialog from '../components/NewPresetDialog.vue'
+import BomEditorDialog from '../components/BomEditorDialog.vue'
 
 const tree = ref([])
 const overview = ref(null)
 const bom = ref(null)
-const bomTitle = ref('')
+const selected = ref(null)
 const error = ref('')
+const notice = ref('')
+
+const showNewPreset = ref(false)
+const showBomEditor = ref(false)
+const deviceTypes = ref([])
+const resourceTemplates = ref([])
+const templateSource = ref('')
+
+const presetsOf = (sub) => sub.presets || sub.preset_types || []
+
+const bomItems = computed(() => {
+  const data = bom.value
+  if (!data) return []
+  if (Array.isArray(data)) return data
+  // 后端字段名在迭代中变化过：items / bom / devices 都兼容
+  return data.items || data.bom || data.devices || []
+})
+
+const selectedLabel = computed(() => (selected.value ? `${selected.value.id} · ${selected.value.name}` : ''))
+
+const aliasOf = (d) => d.alias || d.name || d.device_key || '—'
+const typeOf = (d) => d.device_type || d.category || '—'
+const resourceOf = (d) => d.resource || d.default_address || '—'
+const qtyOf = (d) => d.qty ?? d.quantity ?? 1
+const specOf = (d) => d.spec || d.key_spec || ''
 
 async function load() {
   error.value = ''
@@ -19,12 +47,58 @@ async function load() {
   }
 }
 
+async function ensureTemplates() {
+  if (deviceTypes.value.length && resourceTemplates.value.length) return
+  const t = await loadBomTemplates()
+  deviceTypes.value = t.deviceTypes
+  resourceTemplates.value = t.resourceTemplates
+  templateSource.value = t.source
+}
+
 async function openBom(preset) {
   error.value = ''
+  notice.value = ''
   try {
+    await ensureTemplates()
     const data = await api.bom(preset.id)
+    if (data && data.success === false) throw new Error(data.message || '读取 BOM 失败')
     bom.value = data
-    bomTitle.value = `${preset.id} · ${preset.name}`
+    selected.value = preset
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+function findPreset(id) {
+  for (const p of tree.value) {
+    for (const s of p.subsystems || []) {
+      const hit = presetsOf(s).find((t) => t.id === id)
+      if (hit) return hit
+    }
+  }
+  return null
+}
+
+async function onPresetCreated(preset) {
+  showNewPreset.value = false
+  await load()
+  await openBom(findPreset(preset.id) || preset)
+  notice.value = `已创建测试台类型 ${preset.id}，可直接添加 BOM`
+}
+
+async function openBomEditor() {
+  if (!selected.value) return
+  await ensureTemplates()
+  showBomEditor.value = true
+}
+
+async function onBomSaved(count) {
+  showBomEditor.value = false
+  notice.value = `已保存 ${count} 行 BOM`
+  await load()
+  try {
+    const data = await api.bom(selected.value.id)
+    bom.value = data
   } catch (e) {
     error.value = e.message
   }
@@ -35,6 +109,12 @@ onMounted(load)
 
 <template>
   <div v-if="error" class="error">{{ error }}</div>
+  <div v-if="notice" class="ok">{{ notice }}</div>
+
+  <div class="toolbar">
+    <span class="muted">产品 · 子系统 · 测试台类型三级节点，BOM 改动写入 tree 文件夹后对 Runner 生效</span>
+    <button class="primary" @click="showNewPreset = true">＋ 新建测试台类型</button>
+  </div>
 
   <div v-if="overview" class="stats">
     <div class="card stat"><div class="num">{{ overview.product_count }}</div><div class="muted">产品</div></div>
@@ -55,10 +135,10 @@ onMounted(load)
         <div v-for="s in p.subsystems" :key="s.subsystem" class="sub">
           <div class="sname">{{ s.subsystem }} · {{ s.subsystem_name }}</div>
           <button
-            v-for="t in s.preset_types"
+            v-for="t in presetsOf(s)"
             :key="t.id"
             class="type"
-            :class="{ on: bomTitle.startsWith(t.id) }"
+            :class="{ on: selected && selected.id === t.id }"
             @click="openBom(t)"
           >
             <span class="mono">{{ t.id }}</span>
@@ -67,29 +147,63 @@ onMounted(load)
           </button>
         </div>
       </div>
+      <div v-if="!tree.length" class="muted">暂无节点，点击右上角「＋ 新建测试台类型」创建</div>
     </section>
 
     <section class="card">
-      <h2>{{ bomTitle || 'BOM 明细' }}</h2>
-      <div v-if="!bom" class="muted">选择左侧测试台类型</div>
+      <div class="row" style="justify-content: space-between">
+        <h2>{{ selectedLabel || 'BOM 明细' }}</h2>
+        <button v-if="selected" class="primary" @click="openBomEditor">＋ 添加 BOM</button>
+      </div>
+      <div v-if="!selected" class="muted">选择左侧测试台类型</div>
       <table v-else>
         <thead>
-          <tr><th>设备</th><th>类型</th><th>数量</th><th>关键指标</th></tr>
+          <tr><th>设备别名</th><th>设备类型</th><th>资源描述符</th><th>数量</th><th>关键指标</th></tr>
         </thead>
         <tbody>
-          <tr v-for="(d, i) in bom.items || bom.devices || []" :key="i">
-            <td>{{ d.device || d.name || d.device_key }}</td>
-            <td>{{ d.category || d.device_type }}</td>
-            <td>{{ d.qty || d.quantity || 1 }}</td>
-            <td class="muted">{{ d.spec || d.key_spec || '' }}</td>
+          <tr v-for="(d, i) in bomItems" :key="d.id || i">
+            <td class="mono">{{ aliasOf(d) }}</td>
+            <td>{{ typeOf(d) }}</td>
+            <td class="mono muted">{{ resourceOf(d) }}</td>
+            <td>{{ qtyOf(d) }}</td>
+            <td class="muted">{{ specOf(d) }}</td>
+          </tr>
+          <tr v-if="!bomItems.length">
+            <td colspan="5" class="muted">暂无 BOM 设备，点击右上角「＋ 添加 BOM」新增</td>
           </tr>
         </tbody>
       </table>
     </section>
   </div>
+
+  <NewPresetDialog
+    v-if="showNewPreset"
+    :tree="tree"
+    @close="showNewPreset = false"
+    @created="onPresetCreated"
+  />
+
+  <BomEditorDialog
+    v-if="showBomEditor && selected"
+    :preset="selected"
+    :items="bomItems"
+    :device-types="deviceTypes"
+    :resource-templates="resourceTemplates"
+    :template-source="templateSource"
+    @close="showBomEditor = false"
+    @saved="onBomSaved"
+  />
 </template>
 
 <style scoped>
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
 .stats {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -104,7 +218,7 @@ onMounted(load)
 .num {
   font-size: 22px;
   font-weight: 600;
-  color: var(--primary);
+  color: var(--accent);
 }
 
 .layout {
@@ -126,7 +240,7 @@ h2 {
 .pname {
   font-weight: 600;
   padding: 6px 0;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--border);
 }
 
 .sub {
@@ -135,7 +249,7 @@ h2 {
 
 .sname {
   font-size: 12px;
-  color: var(--ink-2);
+  color: var(--muted);
   margin: 6px 0;
 }
 
@@ -147,17 +261,17 @@ h2 {
   width: 100%;
   text-align: left;
   margin-bottom: 4px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border);
 }
 
 .type.on {
-  border-color: var(--primary);
+  border-color: var(--accent);
   background: var(--primary-soft);
-  color: var(--primary);
+  color: var(--accent);
 }
 
 .mono {
-  font-family: Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px;
 }
 </style>
