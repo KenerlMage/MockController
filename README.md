@@ -155,6 +155,10 @@ TPS 的唯一事实源在本服务，Runner 通过 `/api/v1/tps*` 只读拉取�
 
 摘要字段：`has_constants`、`constant_model_count`、`deploy_count`，供列表页与执行页直接使用。
 
+## 装备助手包规范
+
+助手包支持三类安装方式（免安装 / 自带安装脚本 / 独立安装程序），由包 manifest 的 `install` 块声明，Runner 统一执行并验收。详见 [docs/装备助手包规范.md](docs/装备助手包规范.md)。
+
 ## 常数库
 
 机器常数模型库（`constant_version` / `constant_model` / `constant_value`）已迁入本服务，路由仍为 `/api/constants/*`，数据落 `repo/controller.db`。
