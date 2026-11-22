@@ -21,10 +21,14 @@ D:\ATE\
 
 ## 启动
 
-```bat
-cd D:\ATE\MockController
-start_controller.bat
-```
+双击 `start_controller.bat` 即可（或命令行执行）。脚本会：
+
+1. 依次尝试 `.venv` → 同级 `MockRunner\backend\.venv` → PATH 中的 python；
+2. 只在缺少 fastapi/uvicorn 时安装依赖，不每次联网；
+3. 检查 8070 端口占用；
+4. 服务就绪后自动在 **Microsoft Edge** 打开 `http://127.0.0.1:8070/ui/`。
+
+设 `ATE_NO_BROWSER=1` 可跳过打开浏览器（自动化测试用）。
 
 默认监听 `0.0.0.0:8070`，仓库根 `repo/`（随程序目录推导）。环境变量：
 
