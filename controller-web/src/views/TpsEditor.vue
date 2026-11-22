@@ -25,6 +25,62 @@ const parserName = ref(((props.tps.parser || {}).name) || props.tps.schema || ''
 const processId = ref(((props.tps.process || {}).id) || '')
 
 // ---------------- 机器常数（多行） ----------------
+// 部署编排（SR01-AR06/AR07）：行 = {key, package, target:{id}, order}
+const deployRows = ref([])
+const driverOptions = ref([])
+const deployError = ref('')
+const deviceAliases = computed(() => Object.keys(draft.value.device_config || {}))
+
+async function loadDrivers() {
+  try {
+    const res = await api.softwareList('driver', draft.value.product || '', draft.value.subsystem || '')
+    driverOptions.value = res.items || []
+  } catch (e) {
+    driverOptions.value = []
+  }
+}
+
+function addDeployRow() {
+  deployRows.value.push({ key: '', package: '', target: { id: 'local' }, order: deployRows.value.length + 1 })
+}
+
+function removeDeployRow(i) {
+  deployRows.value.splice(i, 1)
+}
+
+function moveDeployRow(i, delta) {
+  const j = i + delta
+  if (j < 0 || j >= deployRows.value.length) return
+  const rows = deployRows.value
+  ;[rows[i], rows[j]] = [rows[j], rows[i]]
+}
+
+function normalizeDeploy(rows) {
+  return (Array.isArray(rows) ? rows : []).map((r, i) => ({
+    key: String(r.key || '').trim(),
+    package: String(r.package || '').trim(),
+    mode: r.mode || 'ensure',
+    target: { id: (r.target && (r.target.id || r.target)) || 'local' },
+    order: Number(r.order || i + 1),
+    depends_on: Array.isArray(r.depends_on) ? r.depends_on : []
+  }))
+}
+
+function validateDeploy(rows) {
+  const keys = new Set()
+  for (const [i, row] of rows.entries()) {
+    if (!row.package) return `第 ${i + 1} 行未选择驱动`
+    const key = row.key || row.package.split('@')[0]
+    if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(key)) return `第 ${i + 1} 行 key 不合法：${key}`
+    if (keys.has(key)) return `部署 key 重复：${key}`
+    keys.add(key)
+    if (row.target.id !== 'local' && !deviceAliases.value.includes(row.target.id)) {
+      return `第 ${i + 1} 行目标不在设备清单：${row.target.id}`
+    }
+  }
+  return ''
+}
+
 // 每行 = {version, pn, models: []}；保存写 constant_bindings，同时把第一行同步到 constant_model 兼容旧 Runner
 const fallbackVersions = ref([])
 const parserMeta = ref([])
@@ -699,6 +755,16 @@ function save() {
   }
   delete payload.steps
   delete payload._raw
+  const deploy = normalizeDeploy(deployRows.value).filter((r) => r.package)
+  const deployProblem = validateDeploy(deploy)
+  if (deployProblem) {
+    deployError.value = deployProblem
+    error.value = deployProblem
+    return
+  }
+  deployError.value = ''
+  if (deploy.length) payload.deploy = deploy
+  else delete payload.deploy
   emit('save', payload)
 }
 
@@ -719,6 +785,8 @@ function applyTps(val) {
   rawJson.value = JSON.stringify(val, null, 2)
   draft.value.calibration = val.calibration === true || val.is_calibration === true
   bindings.value = initialBindings(val)
+  deployRows.value = normalizeDeploy(val.deploy)
+  loadDrivers()
   steps.value = groupsFromTps(val)
   sopTarget.value = null
   sopNotice.value = ''
@@ -845,6 +913,44 @@ onMounted(() => {
       <button v-for="a in extraAliases" :key="a" class="tag-btn mono" @click="removeExtraAlias(a)">
         {{ a }} ✕
       </button>
+    </div>
+
+    <h3>部署（驱动软件）</h3>
+    <div class="bind-head">
+      <span class="hint">按行顺序部署；目标 local 为本机 PC，其它取本 TPS 设备清单。保存写入 deploy。</span>
+      <button class="mini" data-testid="deploy-add" @click="addDeployRow">＋ 添加部署项</button>
+    </div>
+    <div v-if="deployError" class="error">{{ deployError }}</div>
+    <div v-if="!deployRows.length" class="binding-empty">
+      <span class="muted">当前无部署项（该 TPS 不依赖驱动软件）</span>
+    </div>
+    <div v-for="(row, i) in deployRows" :key="i" class="deploy-row" data-testid="deploy-row">
+      <span class="row-no mono">{{ i + 1 }}</span>
+      <label class="cell">
+        <select v-model="row.package">
+          <option value="">（选择驱动）</option>
+          <option v-for="d in driverOptions" :key="d.id" :value="`${d.name}@${d.version}`">
+            {{ d.name }} {{ d.version }}
+          </option>
+          <option v-if="row.package && !driverOptions.some((d) => `${d.name}@${d.version}` === row.package)" :value="row.package">
+            {{ row.package }}（沿用原值）
+          </option>
+        </select>
+      </label>
+      <label class="cell cell-key">
+        <input v-model="row.key" placeholder="key（小写）" />
+      </label>
+      <label class="cell cell-target">
+        <select v-model="row.target.id">
+          <option value="local">本机 PC</option>
+          <option v-for="a in deviceAliases" :key="a" :value="a">{{ a }}</option>
+        </select>
+      </label>
+      <span class="row-tools">
+        <button class="mini" :disabled="i === 0" @click="moveDeployRow(i, -1)">↑</button>
+        <button class="mini" :disabled="i === deployRows.length - 1" @click="moveDeployRow(i, 1)">↓</button>
+        <button class="tool danger" @click="removeDeployRow(i)">✕</button>
+      </span>
     </div>
 
     <h3>机器常数</h3>
@@ -1216,6 +1322,22 @@ label {
   border: 1px dashed var(--border-strong);
   border-radius: 8px;
 }
+
+.deploy-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--border);
+}
+
+.deploy-row .cell { flex: 1 1 auto; min-width: 0; }
+.deploy-row .cell-key { flex: 0 0 130px; }
+.deploy-row .cell-target { flex: 0 0 130px; }
+.deploy-row select,
+.deploy-row input { width: 100%; }
+
+.row-tools { display: inline-flex; gap: 4px; flex: 0 0 auto; }
 
 .cell-narrow {
   flex: 0 0 128px;

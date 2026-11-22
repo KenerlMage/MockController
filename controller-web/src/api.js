@@ -183,3 +183,25 @@ api.constDecideRequest = (id, body) =>
 api.constBadge = () => request('/api/v1/constants/calib-badge')
 api.constSetBadge = (body) =>
   request('/api/v1/constants/calib-badge', { method: 'PUT', body: JSON.stringify(body) })
+
+
+// ================= 装备软件归档与 TPS 部署（需求《软件部署》SR01）=================
+api.softwareList = (kind = '', product = '', subsystem = '') => {
+  const q = new URLSearchParams()
+  if (kind) q.set('kind', kind)
+  if (product) q.set('product', product)
+  if (subsystem) q.set('subsystem', subsystem)
+  const s = q.toString()
+  return request(`/api/v1/software${s ? '?' + s : ''}`)
+}
+api.softwareArchive = (body) =>
+  request('/api/v1/software', { method: 'POST', body: JSON.stringify(body) })
+api.softwareDelete = (id) =>
+  request(`/api/v1/software/${encodePath(id)}`, { method: 'DELETE' })
+api.softwareRefs = (id) => request(`/api/v1/software/${encodePath(id)}/refs`)
+api.tpsDeploy = (tpsId) => request(`/api/v1/tps/${encodeURIComponent(tpsId)}/deploy`)
+api.tpsDeploySave = (tpsId, deploy) =>
+  request(`/api/v1/tps/${encodeURIComponent(tpsId)}/deploy`, {
+    method: 'PUT',
+    body: JSON.stringify({ deploy })
+  })

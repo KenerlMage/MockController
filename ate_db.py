@@ -248,6 +248,29 @@ CREATE TABLE IF NOT EXISTS const_push_log (
     created_at TEXT
 );
 
+-- 装备软件归档（SR01-AR02）：按产品+子系统+类型+名称+版本，不绑测试台类型
+CREATE TABLE IF NOT EXISTS software_archive (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    product      TEXT NOT NULL,
+    subsystem    TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    version      TEXT NOT NULL,
+    path         TEXT,
+    sha256       TEXT,
+    size         INTEGER DEFAULT 0,
+    scripts_json TEXT,
+    needs_deploy INTEGER DEFAULT 0,
+    auto_deploy  INTEGER DEFAULT 0,
+    vendor       TEXT,
+    license      TEXT,
+    uploaded_by  TEXT,
+    created_at   TEXT,
+    UNIQUE (product, subsystem, kind, name, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_software_scope ON software_archive (product, subsystem, kind);
+
 -- 外部常数系统（MCS）导入批次台账（SR01-AR09）
 CREATE TABLE IF NOT EXISTS const_package (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,

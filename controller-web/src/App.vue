@@ -7,6 +7,7 @@ import TpsView from './views/TpsView.vue'
 import MetadataView from './views/MetadataView.vue'
 import ProcessesView from './views/ProcessesView.vue'
 import ConstantsView from './views/ConstantsView.vue'
+import SoftwareView from './views/SoftwareView.vue'
 
 const health = ref(null)
 const error = ref('')
@@ -16,6 +17,20 @@ const error = ref('')
 const tabs = [
   { id: 'tps', icon: '▤', name: 'TPS 管理', desc: '清单 · 部署 · 常数绑定', code: 'TPS' },
   { id: 'packages', icon: '▣', name: '软件包', desc: '归档 · 版本 · 探测', code: 'PKG' },
+  {
+    id: 'software',
+    icon: '▣',
+    name: '装备软件',
+    desc: '助手 · 驱动 · TPS · 三方',
+    code: 'SW',
+    children: [
+      { id: 'software', testId: 'software-all', icon: '▣', name: '全部软件', desc: '归档与清单', code: 'ALL' },
+      { id: 'software-assistant', icon: '⚒', name: '装备助手', desc: '装调类 · 独立部署', code: 'AST' },
+      { id: 'software-driver', icon: '⚙', name: '驱动软件', desc: 'TPS 运行依赖', code: 'DRV' },
+      { id: 'software-tps', icon: '▤', name: 'TPS', desc: '测试用例集', code: 'TPS' },
+      { id: 'software-thirdparty', icon: '▣', name: '三方软件', desc: '第三方依赖', code: '3RD' }
+    ]
+  },
   {
     id: 'metadata',
     icon: '◈',
@@ -31,10 +46,20 @@ const tabs = [
 ]
 
 const METADATA_CHILD_IDS = ['metadata', 'constants', 'processes']
+const SOFTWARE_CHILD_IDS = ['software', 'software-assistant', 'software-driver', 'software-tps', 'software-thirdparty']
 
 // 二级项选中时，一级「元数据」保持高亮
 const isActive = (t) =>
   store.tab === t.id || (Array.isArray(t.children) && t.children.some((c) => c.id === store.tab))
+
+// 装备软件下的二级项共用 SoftwareView，用 kind 区分
+const softwareKind = computed(() => {
+  if (store.tab === 'software-assistant') return 'assistant'
+  if (store.tab === 'software-driver') return 'driver'
+  if (store.tab === 'software-tps') return 'tps'
+  if (store.tab === 'software-thirdparty') return 'thirdparty'
+  return 'driver'
+})
 
 const current = computed(() => {
   // 先匹配二级项：装备树的 id 与一级「元数据」同名，先查 children 才不会显示成一级标题
@@ -52,7 +77,8 @@ function pick(t) {
   if (Array.isArray(t.children)) {
     // 点一级一律展开并进入第一个二级项；收起由二级项的切换代替，避免"点了没反应"
     expanded.value = true
-    if (!METADATA_CHILD_IDS.includes(store.tab)) store.switchTab(t.children[0].id)
+    const childIds = t.id === 'software' ? SOFTWARE_CHILD_IDS : METADATA_CHILD_IDS
+    if (!childIds.includes(store.tab)) store.switchTab(t.children[0].id)
     return
   }
   store.switchTab(t.id)
@@ -157,6 +183,11 @@ onMounted(async () => {
       <MetadataView v-else-if="store.tab === 'metadata'" />
       <ProcessesView v-else-if="store.tab === 'processes'" />
       <ConstantsView v-else-if="store.tab === 'constants'" />
+      <SoftwareView
+        v-else-if="SOFTWARE_CHILD_IDS.includes(store.tab)"
+        :initial-kind="softwareKind"
+        :key="softwareKind"
+      />
     </main>
   </div>
 </template>

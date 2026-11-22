@@ -46,6 +46,15 @@ try:
 except Exception as exc:  # noqa: BLE001
     print(f"[warn] 常数模块未挂载: {exc}")
 
+# ---- 装备软件归档（需求《软件部署》SR01）----
+try:
+    import software as software_mod  # noqa: E402
+
+    software_mod.register_routes(app, REPO_ROOT, REPO_ROOT / "controller.db")
+    print("[ok] software 已挂载")
+except Exception as exc:  # noqa: BLE001
+    print(f"[warn] software 未挂载: {exc}")
+
 # ---- 机器常数：导入 / 审批 / 目录（需求 SR01）----
 for _mod_name in ("const_import", "const_approval", "const_catalog"):
     try:
