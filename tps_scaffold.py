@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 import metadata
 import processes
+import tps_schema
 
 DEFAULT_PARSER = "tps.v2"
 
@@ -202,6 +203,8 @@ def context(tps: dict) -> dict:
     return {
         "ok": True,
         "tps": tps,
+        # 步骤区：三段各自的条目视图（id/name/type/case/resource/sop/timeout_s/step/checks）
+        "steps": tps_schema.entry_groups(tps),
         "preset": _preset_view(preset) if preset else None,
         "bom": bom,
         "processes": [

@@ -96,6 +96,11 @@ export const api = {
       method: 'DELETE'
     }),
 
+  tpsSopSave: (id, payload) =>
+    request(`/api/v1/tps/${encodeURIComponent(id)}/sop`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
   tpsParsers: () => request('/api/v1/tps/parsers'),
   tpsContext: (id) => request(`/api/v1/tps/${encodeURIComponent(id)}/context`),
   tpsScaffold: (payload) =>

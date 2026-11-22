@@ -4,7 +4,8 @@ import { onBeforeUnmount, onMounted } from 'vue'
 const props = defineProps({
   title: { type: String, default: '' },
   subtitle: { type: String, default: '' },
-  width: { type: String, default: '760px' }
+  width: { type: String, default: '760px' },
+  testid: { type: String, default: 'modal' }
 })
 
 const emit = defineEmits(['close'])
@@ -19,7 +20,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 <template>
   <div class="overlay" @mousedown.self="emit('close')">
-    <section class="panel card" :style="{ width: props.width }" role="dialog" aria-modal="true">
+    <section
+      class="panel card"
+      :style="{ width: props.width }"
+      :data-testid="props.testid"
+      role="dialog"
+      aria-modal="true"
+    >
       <header class="panel-head">
         <div class="head-text">
           <h2>{{ title }}</h2>

@@ -512,12 +512,14 @@ defineExpose({ save, reload: () => loadFiles(true), isDirty: () => dirty.value }
         <span class="hint">相对 TPS 目录，父目录不存在会自动创建</span>
       </div>
 
-      <div class="tree">
+      <div class="tree" data-testid="code-file-tree">
         <!-- 根目录直属文件 -->
         <div
           v-for="file in tree.files"
           :key="file.path"
           class="node file"
+          data-testid="code-file"
+          :data-path="file.path"
           :class="{ on: file.path === current, dim: isHidden(file.path) }"
           @click="openFile(file.path)"
         >
@@ -531,7 +533,7 @@ defineExpose({ save, reload: () => loadFiles(true), isDirty: () => dirty.value }
 
         <!-- 一级目录（可折叠） -->
         <template v-for="dir in topDirs" :key="dir.path">
-          <div class="node folder" @click="toggleDir(dir.path)">
+          <div class="node folder" data-testid="code-dir" :data-dir="dir.path" @click="toggleDir(dir.path)">
             <span class="caret">{{ isOpen(dir.path) ? '▾' : '▸' }}</span>
             <span class="icon">📁</span>
             <span class="name">{{ dir.name }}</span>
@@ -546,6 +548,8 @@ defineExpose({ save, reload: () => loadFiles(true), isDirty: () => dirty.value }
               v-for="sub in filesUnder(dir)"
               :key="sub.path"
               class="node file child"
+              data-testid="code-file"
+              :data-path="sub.path"
               :class="{ on: sub.path === current, dim: isHidden(sub.path) }"
               @click="openFile(sub.path)"
             >
@@ -603,7 +607,7 @@ defineExpose({ save, reload: () => loadFiles(true), isDirty: () => dirty.value }
         <span class="mono path">{{ current || '未选择文件' }}</span>
         <span v-if="dirty" class="dot" title="有未保存修改">● 未保存</span>
         <span v-if="loading" class="muted">读取中…</span>
-        <button class="mini primary" :disabled="!current || saving || loading || !dirty" @click="save">
+        <button class="mini primary" data-testid="code-save" :disabled="!current || saving || loading || !dirty" @click="save">
           {{ saving ? '保存中…' : '保存' }}
         </button>
       </div>
@@ -616,10 +620,10 @@ defineExpose({ save, reload: () => loadFiles(true), isDirty: () => dirty.value }
       </div>
 
       <div v-if="error" class="error">{{ error }}</div>
-      <div v-if="notice" class="ok">{{ notice }}</div>
+      <div v-if="notice" class="ok" data-testid="code-notice">{{ notice }}</div>
 
       <div class="editor-host-wrap">
-        <div ref="host" class="editor-host"></div>
+        <div ref="host" class="editor-host" data-testid="code-editor-host"></div>
         <div v-if="!current" class="editor-hint muted">
           左侧选择文件开始编辑；Ctrl+S 保存，Tab 缩进 4 空格，括号自动匹配。
         </div>

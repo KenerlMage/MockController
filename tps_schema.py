@@ -24,6 +24,10 @@ ID_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 # 人工操作条目的提示文件（Markdown）：resource/ 下的文件名，可含一层子目录
 MANUAL_RESOURCE_RE = re.compile(r"^[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)*\.(?:md|markdown|txt)$", re.I)
 MANUAL_TYPES = {"manual", "人工", "human"}
+# 条目类型：auto（缺省，调用 testcase 实现）/ manual（Runner 弹窗等操作员确认）
+ENTRY_TYPES = {"auto", "manual"}
+# 内联 SOP（Markdown 文本）上限：避免把大文件塞进 tps.json
+SOP_MAX_CHARS = 20000
 # 单步执行：条目上的 `"step": true` —— 本条执行完暂停，等操作员点「下一步 next」再继续
 STEP_KEYS = ("step", "single_step", "step_hold")
 
@@ -258,18 +262,40 @@ def _validate_case(case: Any, index: int, testconfig: dict, seen_ids: set, prefi
             errors.append(f"{prefix}[{index}].id 重复: {case_id}")
         else:
             seen_ids.add(case_id)
-    if is_manual_case(case):
-        # 人工操作环节：弹窗由 Runner 执行，不需要用例实现，只声明提示文件
-        resource = str(case.get("resource") or "").strip()
-        if not resource:
+    type_text = case.get("type")
+    if type_text not in (None, ""):
+        normalized = str(type_text).strip().lower()
+        if normalized not in ENTRY_TYPES:
             errors.append(
-                f"{prefix}[{index}] 人工操作条目（type=manual）缺少 resource"
-                "（resource/ 目录下的 Markdown 文件名，如 fixture_check.md）"
+                f"{prefix}[{index}].type 只能是 auto 或 manual（实际: {type_text}）；缺省视为 auto"
             )
-        elif not MANUAL_RESOURCE_RE.match(resource):
+
+    if is_manual_case(case):
+        # 人工操作环节：Runner 弹窗等操作员确认，不需要用例实现
+        resource = str(case.get("resource") or "").strip()
+        sop = case.get("sop")
+        sop_text = sop.strip() if isinstance(sop, str) else ""
+        if resource:
+            if not MANUAL_RESOURCE_RE.match(resource):
+                errors.append(
+                    f"{prefix}[{index}].resource 只能是 resource/ 下的 .md/.txt 文件名"
+                    f"（实际: {resource}）"
+                )
+        elif not sop_text:
             errors.append(
-                f"{prefix}[{index}].resource 只能是 resource/ 下的 .md/.txt 文件名"
-                f"（实际: {resource}）"
+                f"{prefix}[{index}] 人工操作条目（type=manual）需要 resource"
+                "（resource/ 下的 .md/.txt 文件名，如 fixture_check.md）或 sop（内联 Markdown 文本）"
+            )
+        if sop is not None:
+            if not isinstance(sop, str):
+                errors.append(f"{prefix}[{index}].sop 必须是字符串（内联 Markdown 文本）")
+            elif len(sop) > SOP_MAX_CHARS:
+                errors.append(
+                    f"{prefix}[{index}].sop 超过 {SOP_MAX_CHARS} 字符上限（实际 {len(sop)}）"
+                )
+        if str(case.get("case") or "").strip():
+            errors.append(
+                f"{prefix}[{index}] 人工条目（type=manual）不能同时声明 case：manual 与 case 互斥"
             )
         timeout = case.get("timeout_s")
         if timeout is not None and (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)):
@@ -359,6 +385,42 @@ def case_entries(tps: dict) -> dict:
                 "hold_timeout_s": case.get("timeout_s") if (is_step_hold(case) and not manual) else None,
             })
     return out
+
+
+def entry_groups(tps: dict) -> dict:
+    """按 setup / cmd_suit / teardown 分组返回条目视图（编辑器步骤区 / 只读渲染用）
+
+    每项固定字段：id / name / type / case / resource / sop / timeout_s / step / checks；
+    人工条目不带 case，自动条目不带 resource / sop，避免前端按类型分支时拿到脏值。
+    """
+    groups: dict[str, list[dict]] = {}
+    for section in ("setup", "cmd_suit", "teardown"):
+        rows: list[dict] = []
+        for raw in tps.get(section) or []:
+            if not isinstance(raw, dict):
+                continue
+            manual = is_manual_case(raw)
+            checks = raw.get("checks")
+            if isinstance(checks, list):
+                checks = {str(k): str(k) for k in checks}
+            elif isinstance(checks, str):
+                checks = {"value": checks}
+            elif not isinstance(checks, dict):
+                checks = {}
+            rows.append({
+                "id": str(raw.get("id") or ""),
+                "name": str(raw.get("name") or ""),
+                "type": "manual" if manual else "auto",
+                "case": "" if manual else str(raw.get("case") or ""),
+                "resource": str(raw.get("resource") or "") if manual else "",
+                "sop": str(raw.get("sop") or "") if manual else "",
+                "timeout_s": raw.get("timeout_s"),
+                # 人工条目本身就是暂停点，单步暂停只对自动条目有意义
+                "step": is_step_hold(raw) and not manual,
+                "checks": dict(checks),
+            })
+        groups[section] = rows
+    return groups
 
 
 def steps_of(tps: dict) -> list[dict]:

@@ -44,6 +44,9 @@ ALLOWED_FILE_SUFFIXES = {".py", ".md", ".txt", ".json", ".yaml", ".yml"}
 MAX_FILE_BYTES = 2 * 1024 * 1024
 # 允许删除的目录（tps.json 等清单本体不在此列）
 DELETABLE_ROOTS = {"testcase", "resource"}
+# 人工步骤 SOP 只接受这两类文本文件
+SOP_DIR = "resource"
+SOP_SUFFIXES = {".md", ".txt"}
 
 
 class TpsError(Exception):
@@ -291,6 +294,8 @@ def save(raw: dict, overwrite: bool = True) -> dict:
 
     payload = dict(raw)
     normalize_constants(payload)
+    # 只写了内联 sop 的人工条目：落成 resource/<id>.md，Runner 弹窗读的是文件
+    _materialize_sop(payload, tps_id)
     payload["updated_at"] = _now()
     (target / "tps.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -354,6 +359,96 @@ def import_zip(name: str, content_base64: str, overwrite: bool = True) -> dict:
     payload["updated_at"] = _now()
     (target / "tps.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return _summary(payload)
+
+
+def _step_entries(raw: dict):
+    """遍历三段里的条目：(section, entry)，跳过非对象。"""
+    for section in ("setup", "cmd_suit", "teardown"):
+        entries = raw.get(section)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict):
+                yield section, entry
+
+
+def _sop_filename(step_id: str, filename: str) -> str:
+    """SOP 文件名：只取一段文件名，后缀限 .md/.txt；缺省 <step_id>.md。"""
+    text = str(filename or "").strip().replace("\\", "/")
+    name = text.rsplit("/", 1)[-1] if text else ""
+    if not name:
+        return f"{step_id}.md"
+    if not re.match(r"^[A-Za-z0-9_.\-]+$", name):
+        raise TpsError(f"SOP 文件名只允许字母、数字、下划线、点与短横线：{filename}")
+    if Path(name).suffix.lower() not in SOP_SUFFIXES:
+        raise TpsError(f"SOP 文件名只支持 .md / .txt：{filename}")
+    return name
+
+
+def _materialize_sop(payload: dict, tps_id: str) -> None:
+    """人工条目只有内联 sop 时补一个 resource 文件，保证 Runner 能弹窗。
+
+    校验已通过才会走到这里；文件按条目 id 命名（id 在清单内唯一）。
+    """
+    fallback = 0
+    for section in ("setup", "cmd_suit", "teardown"):
+        rows = payload.get(section)
+        if not isinstance(rows, list):
+            continue
+        for pos, entry in enumerate(rows):
+            fallback += 1
+            if not isinstance(entry, dict) or not tps_schema.is_manual_case(entry):
+                continue
+            if str(entry.get("resource") or "").strip():
+                continue
+            text = entry.get("sop")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            step_id = str(entry.get("id") or f"sop{fallback}").strip()
+            resource = f"{SOP_DIR}/{_sop_filename(step_id, '')}"
+            write_file(tps_id, resource, text)
+            # 用新对象替换，避免改动调用方传入的字典
+            rows[pos] = {**entry, "resource": resource}
+
+
+def save_sop(tps_id: str, step_id: str, markdown: str, title: str = "", filename: str = "") -> dict:
+    """「编辑 SOP」保存：写 resource/<name>.md，并把条目的 resource 指向该文件。
+
+    条目不存在时只写文件（前端可能刚新增步骤行、清单尚未保存），返回 updated=false。
+    """
+    if not exists(tps_id):
+        raise TpsError(f"TPS 不存在：{tps_id}")
+    sid = str(step_id or "").strip()
+    if not ID_RE.match(sid):
+        raise TpsError(f"step_id 只允许字母、数字、下划线、点与短横线：{step_id}")
+    if not isinstance(markdown, str):
+        raise TpsError("markdown 必须是字符串")
+    if len(markdown) > tps_schema.SOP_MAX_CHARS:
+        raise TpsError(f"SOP 超过 {tps_schema.SOP_MAX_CHARS} 字符上限（实际 {len(markdown)}）")
+
+    raw = load(tps_id)
+    resource = f"{SOP_DIR}/{_sop_filename(sid, filename)}"
+    info = write_file(tps_id, resource, markdown)
+
+    updated = False
+    for _, entry in _step_entries(raw):
+        if str(entry.get("id") or "") != sid:
+            continue
+        entry["resource"] = resource
+        entry.pop("sop", None)  # 文件成为唯一事实源
+        if title and not str(entry.get("name") or "").strip():
+            entry["name"] = str(title).strip()
+        updated = True
+        break
+    if updated:
+        save(raw)
+    return {
+        "ok": True,
+        "step_id": sid,
+        "resource": resource,
+        "size": info["size"],
+        "updated": updated,
+    }
 
 
 def list_files(tps_id: str) -> list[str]:

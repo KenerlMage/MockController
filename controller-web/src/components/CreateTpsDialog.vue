@@ -249,6 +249,7 @@ onMounted(loadRefs)
     title="创建 TPS"
     :subtitle="`测试台类型 ${presetLabel} · 全部选项来自下拉，创建后自动跳到 TPS 管理`"
     width="880px"
+    testid="create-tps-dialog"
     @close="emit('close')"
   >
     <div v-if="error" class="error">{{ error }}</div>
@@ -277,7 +278,7 @@ onMounted(loadRefs)
       <div class="grid">
         <div class="field">
           <span class="label">工序 <em>*</em></span>
-          <select v-model="form.process_id" :disabled="loading || !processes.length">
+          <select v-model="form.process_id" data-testid="create-process" :disabled="loading || !processes.length">
             <option v-if="!processes.length" value="">（工序接口未就绪）</option>
             <option v-for="p in processes" :key="p.id" :value="p.id">
               {{ processLabel(p) }}
@@ -286,7 +287,7 @@ onMounted(loadRefs)
         </div>
         <div class="field">
           <span class="label">解析器 <em>*</em></span>
-          <select v-model="form.parser" :disabled="loading || !parsers.length">
+          <select v-model="form.parser" data-testid="create-parser" :disabled="loading || !parsers.length">
             <option v-if="!parsers.length" value="">（解析器接口未就绪）</option>
             <option v-for="p in parsers" :key="p.name" :value="p.name">
               {{ p.label || p.name }}{{ p.default ? '（默认）' : '' }}
@@ -339,7 +340,7 @@ onMounted(loadRefs)
       </div>
     </div>
 
-    <div class="section">
+    <div class="section" data-testid="create-devices">
       <div class="section-title">设备（BOM）</div>
       <div v-if="devices.length" class="dev-box">
         <div class="dev-head">

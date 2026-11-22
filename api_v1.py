@@ -44,6 +44,15 @@ class TpsFileWrite(BaseModel):
     encoding: str = "utf-8"
 
 
+class TpsSopSave(BaseModel):
+    """人工步骤 SOP：写 resource/<filename 或 step_id>.md 并回填条目的 resource。"""
+
+    step_id: str
+    title: str = ""
+    markdown: str = ""
+    filename: str = ""
+
+
 class ProcessUpsert(BaseModel):
     id: str
     code: str = ""
@@ -391,6 +400,18 @@ def constants_import_file(req: ConstantsFileImport) -> dict:
         "restored_values": result.get("restored_values", 0),
         "message": result.get("message", ""),
     }
+
+
+@router.post("/tps/{tps_id}/sop")
+def tps_save_sop(tps_id: str, req: TpsSopSave) -> dict:
+    if not tps_store.exists(tps_id):
+        raise HTTPException(status_code=404, detail=f"TPS 不存在：{tps_id}")
+    try:
+        return tps_store.save_sop(
+            tps_id, req.step_id, req.markdown, title=req.title, filename=req.filename
+        )
+    except tps_store.TpsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/tps/{tps_id}/files")

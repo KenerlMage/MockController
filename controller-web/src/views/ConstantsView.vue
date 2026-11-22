@@ -233,7 +233,7 @@ onMounted(async () => {
         <strong>按子系统导入压缩包</strong>
         <span class="muted">选产品 / 子系统后上传 zip，服务端按 PN 归入该子系统</span>
       </div>
-      <button class="primary" @click="openZip">选择压缩包</button>
+      <button class="primary" data-testid="constants-zip-open" @click="openZip">选择压缩包</button>
     </div>
     <div class="import-entry">
       <div class="entry-text">
@@ -247,7 +247,7 @@ onMounted(async () => {
         </select>
         <label class="btn file-btn" :class="{ busy: fileRunning }">
           {{ fileRunning ? '导入中…' : '选择 .json' }}
-          <input type="file" accept=".json,application/json" :disabled="fileRunning" @change="onModelFile" />
+          <input type="file" accept=".json,application/json" data-testid="constants-json-input" :disabled="fileRunning" @change="onModelFile" />
         </label>
       </div>
     </div>
@@ -333,6 +333,7 @@ onMounted(async () => {
     title="按子系统导入常数压缩包"
     subtitle="产品 / 子系统来自常数装备树；上传后由服务端按 PN 归入该子系统"
     width="820px"
+    testid="constants-zip-dialog"
     @close="showZip = false"
   >
     <div v-if="zipTreeError" class="warn">{{ zipTreeError }}</div>

@@ -393,7 +393,7 @@ watch(
 </script>
 
 <template>
-  <div class="layout">
+  <div class="layout" data-testid="tps-view">
     <section class="card tree-card">
       <div class="row" style="justify-content: space-between">
         <h2>TPS 清单</h2>
@@ -401,18 +401,18 @@ watch(
           <button class="mini" :disabled="loading" title="刷新装备树与清单" @click="load">
             {{ loading ? '…' : '刷新' }}
           </button>
-          <button class="mini primary" @click="openCreate(null, null, null)">＋ 新建 TPS</button>
+          <button class="mini primary" data-testid="create-tps" @click="openCreate(null, null, null)">＋ 新建 TPS</button>
         </div>
       </div>
 
       <div class="search">
-        <input v-model="keyword" type="search" placeholder="按 TPS 名称 / 编号过滤" />
-        <span class="count mono">{{ visibleCount }}/{{ items.length }}</span>
+        <input v-model="keyword" data-testid="tps-search" type="search" placeholder="按 TPS 名称 / 编号过滤" />
+        <span class="count mono" data-testid="tps-count">{{ visibleCount }}/{{ items.length }}</span>
       </div>
 
       <div class="tree-tools">
-        <button class="mini" @click="expandAll">全部展开</button>
-        <button class="mini" @click="collapseAll">全部收起</button>
+        <button class="mini" data-testid="tree-expand-all" @click="expandAll">全部展开</button>
+        <button class="mini" data-testid="tree-collapse-all" @click="collapseAll">全部收起</button>
         <span class="legend">
           <span class="mark mono">C</span> 常数绑定
           <span class="mark">📦</span> 部署
@@ -421,9 +421,9 @@ watch(
 
       <div v-if="warn" class="warn-line">{{ warn }}</div>
 
-      <div class="tree">
+      <div class="tree" data-testid="tps-tree">
         <div v-for="prod in tree" :key="prod.key" class="prod">
-          <div class="node lv1" @click="toggle(prod.key)">
+          <div class="node lv1" data-testid="tree-product" :data-product="prod.product" @click="toggle(prod.key)">
             <span class="caret">{{ isOpen(prod.key) ? '▾' : '▸' }}</span>
             <span class="icon">◈</span>
             <span class="name" :title="prod.product">{{ prod.label }}</span>
@@ -439,7 +439,7 @@ watch(
 
           <template v-if="isOpen(prod.key)">
             <div v-for="sub in prod.subsystems" :key="sub.key" class="sub">
-              <div class="node lv2" @click="toggle(sub.key)">
+              <div class="node lv2" data-testid="tree-subsystem" :data-subsystem="sub.subsystem" @click="toggle(sub.key)">
                 <span class="caret">{{ isOpen(sub.key) ? '▾' : '▸' }}</span>
                 <span class="icon">▦</span>
                 <span class="name" :title="sub.subsystem">{{ sub.label }}</span>
@@ -461,7 +461,7 @@ watch(
 
               <template v-if="isOpen(sub.key)">
                 <div v-for="type in sub.types" :key="type.key" class="type">
-                  <div class="node lv3" @click="toggle(type.key)">
+                  <div class="node lv3" data-testid="tree-type" :data-preset="type.presetId" @click="toggle(type.key)">
                     <span class="caret">{{ isOpen(type.key) ? '▾' : '▸' }}</span>
                     <span class="icon">◻</span>
                     <span class="name" :title="type.presetId">{{ type.label }}</span>
@@ -481,6 +481,8 @@ watch(
                       v-for="entry in type.tpss"
                       :key="entry.t.id"
                       class="node lv4"
+                      data-testid="tree-tps"
+                      :data-tps-id="entry.t.id"
                       :class="{ on: entry.t.id === selectedId }"
                       @click="open(entry.t.id)"
                     >
@@ -546,18 +548,18 @@ watch(
       @close="createCtx = null"
       @created="onCreateConfirmed"
     />
-    <div v-else-if="createCtx" class="picker-backdrop" @mousedown.self="createCtx = null">
+    <div v-else-if="createCtx" class="picker-backdrop" data-testid="preset-picker" @mousedown.self="createCtx = null">
       <div class="picker card">
         <h3>选择测试台类型</h3>
         <p class="muted">新建 TPS 会归入所选类型所在的 产品 / 子系统</p>
-        <select v-model="createCtx.selected">
+        <select v-model="createCtx.selected" data-testid="preset-picker-select">
           <option v-for="x in createCtx.types" :key="x.preset.id" :value="x.preset.id">
             {{ createCtxLabel(x) }}
           </option>
         </select>
         <div class="row" style="justify-content: flex-end; margin-top: 12px">
           <button class="mini" @click="createCtx = null">取消</button>
-          <button class="mini primary" @click="nextCreateStep">下一步</button>
+          <button class="mini primary" data-testid="preset-picker-next" @click="nextCreateStep">下一步</button>
         </div>
       </div>
     </div>

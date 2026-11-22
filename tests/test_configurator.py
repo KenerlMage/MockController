@@ -5,7 +5,8 @@
   2. TPS 可按三级归组管理，并能在子系统/测试台类型上创建（scaffold）；
   3. TPS 机器常数支持多行绑定；
   4. 常数按子系统以 zip / 单文件 / bundle 导入；
-  5. 用例代码文件可在线读写。
+  5. 用例代码文件可在线读写；
+  6. 用例步骤支持 auto / manual，manual 的 SOP 可写文件并回填 resource。
 
 运行：
     python -m pytest tests -q
@@ -238,3 +239,75 @@ def test_constants_subsystems_list(cli):
     data = cli.get("/api/v1/constants/subsystems").json()
     assert data["ok"] is True
     assert isinstance(data["items"], list)
+
+
+# ------------------------------------------------------------------ 5. 用例步骤（manual + SOP）
+
+def test_tps_steps_manual_sop(cli):
+    manifest = {
+        "schema": "tps.v2",
+        "id": "steps-manual",
+        "name": "步骤编辑",
+        "testconfig": {"TC_A": {"min": 0, "max": 1}},
+        "device_config": {"psu": {"role": "psu"}},
+        "cmd_suit": [
+            {"id": "C1", "name": "自动条目", "case": "testcase.demo::main", "checks": {"a": "TC_A"}},
+            {"id": "M1", "name": "人工条目", "type": "manual", "sop": "# 检查外观", "timeout_s": 300},
+        ],
+    }
+
+    def put(payload):
+        return cli.put("/api/v1/tps/steps-manual", json={"tps": payload, "overwrite": True})
+
+    created = put(manifest)
+    assert created.status_code == 200, created.text
+
+    back = cli.get("/api/v1/tps/steps-manual").json()["tps"]
+    auto = next(e for e in back["cmd_suit"] if e["id"] == "C1")
+    manual = next(e for e in back["cmd_suit"] if e["id"] == "M1")
+    # 没有 type 的旧条目按 auto 处理
+    assert "type" not in auto and auto["case"] == "testcase.demo::main"
+    # 内联 sop 落成 resource 文件，Runner 弹窗才有内容可读
+    assert manual["type"] == "manual" and manual["sop"].startswith("# 检查外观")
+    assert manual["resource"] == "resource/M1.md"
+    assert cli.get("/api/v1/tps/steps-manual/files/resource/M1.md").text == "# 检查外观"
+
+    # manual 与 case 互斥
+    conflict = put({**manifest, "cmd_suit": manifest["cmd_suit"] + [
+        {"id": "M2", "name": "冲突", "type": "manual", "sop": "x", "case": "testcase.demo::main"},
+    ]})
+    assert conflict.status_code == 400 and "互斥" in conflict.text
+
+    # manual 必须有 resource 或 sop
+    empty = put({**manifest, "cmd_suit": manifest["cmd_suit"] + [
+        {"id": "M3", "name": "空条目", "type": "manual"},
+    ]})
+    assert empty.status_code == 400 and "需要 resource" in empty.text
+
+    # type 只允许 auto / manual
+    wrong = put({**manifest, "cmd_suit": [{**manifest["cmd_suit"][0], "type": "robot"}]})
+    assert wrong.status_code == 400 and "只能是 auto 或 manual" in wrong.text
+
+    # POST /sop：写文件 + 回填 resource
+    markdown = "# 外观 SOP\n\n1. 外壳无划伤\n"
+    sop = cli.post(
+        "/api/v1/tps/steps-manual/sop",
+        json={"step_id": "M1", "title": "人工条目", "markdown": markdown, "filename": ""},
+    )
+    assert sop.status_code == 200, sop.text
+    assert sop.json()["resource"] == "resource/M1.md"
+    assert cli.get("/api/v1/tps/steps-manual/files/resource/M1.md").text == markdown
+    bad_name = cli.post(
+        "/api/v1/tps/steps-manual/sop",
+        json={"step_id": "M1", "markdown": "x", "filename": "a.py"},
+    )
+    assert bad_name.status_code == 400
+
+    # context.steps：三段结构 + 字段齐全
+    steps = cli.get("/api/v1/tps/steps-manual/context").json()["steps"]
+    assert set(steps) == {"setup", "cmd_suit", "teardown"}
+    assert steps["setup"] == [] and steps["teardown"] == []
+    assert [e["id"] for e in steps["cmd_suit"]] == ["C1", "M1"]
+    for key in ("id", "name", "type", "case", "resource", "sop", "timeout_s", "step", "checks"):
+        assert key in steps["cmd_suit"][1], key
+    assert steps["cmd_suit"][1]["type"] == "manual" and steps["cmd_suit"][1]["case"] == ""

@@ -46,7 +46,12 @@ onMounted(async () => {
       </div>
 
       <!-- 服务状态 -->
-      <div class="status-chip" :class="{ offline: !health }" :title="health ? health.tps.root : '未连接'">
+      <div
+        class="status-chip"
+        data-testid="service-status"
+        :class="{ offline: !health }"
+        :title="health ? health.tps.root : '未连接'"
+      >
         <span class="status-label">服务状态</span>
         <span class="status-name">
           {{ health ? '已连接 · API v1' : '未连接' }}
@@ -62,6 +67,8 @@ onMounted(async () => {
           v-for="t in tabs"
           :key="t.id"
           class="side-item"
+          :data-testid="`nav-${t.id}`"
+          :data-tab="t.id"
           :class="{ active: store.tab === t.id }"
           @click="store.switchTab(t.id)"
         >
@@ -83,7 +90,7 @@ onMounted(async () => {
 
     <main class="app-main">
       <header class="page-head">
-        <h1>{{ current.name }}</h1>
+        <h1 data-testid="page-title">{{ current.name }}</h1>
         <span class="page-sub">Runner 通过 /api/v1 读取，本页面写入即生效</span>
       </header>
 

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../api.js'
 import CodeWorkspace from '../components/CodeWorkspace.vue'
+import SopEditorDialog from '../components/SopEditorDialog.vue'
 
 const props = defineProps({
   tps: { type: Object, required: true },
@@ -31,6 +32,257 @@ const catalog = ref([]) // 归一化后 [{version, pn, models:[{model_key,name}]
 const rowPns = ref({}) // rowIndex -> 该版本 PN 列表
 const rowModels = ref({}) // rowIndex -> 该 PN 模型列表
 const bindings = ref([{ version: '', pn: '', models: [] }])
+
+// ---------------- 用例步骤（setup / cmd_suit / teardown） ----------------
+// 三个分组各一组条目；表单是步骤区的写入口，任何改动都即时回写清单原文 JSON
+const STEP_GROUPS = [
+  { key: 'setup', label: '前置 setup', prefix: 'SET' },
+  { key: 'cmd_suit', label: '测试 cmd_suit', prefix: 'TC' },
+  { key: 'teardown', label: '收尾 teardown', prefix: 'TD' }
+]
+const STEP_ID_PAD = { setup: 2, cmd_suit: 3, teardown: 2 }
+// 已知字段之外的键（no / description / params / config / optional ...）原样保留
+const STEP_KNOWN_KEYS = [
+  'id', 'name', 'type', 'kind', 'case', 'resource', 'sop', 'timeout_s',
+  'step', 'single_step', 'step_hold', 'checks'
+]
+const MANUAL_ALIASES = ['manual', '人工', 'human']
+
+const activeGroup = ref('cmd_suit')
+const steps = ref(emptyGroups())
+const sopTarget = ref(null) // { step }：正在编辑 SOP 的条目
+const sopNotice = ref('') // SOP 保存成功提示（页面级）
+let stepSeq = 0
+
+const currentSteps = computed(() => steps.value[activeGroup.value] || [])
+const activeGroupLabel = computed(() => {
+  const hit = STEP_GROUPS.find((g) => g.key === activeGroup.value)
+  return hit ? hit.label : ''
+})
+
+function emptyGroups() {
+  return { setup: [], cmd_suit: [], teardown: [] }
+}
+
+// checks 的三种历史写法（对象 / 数组 / 字符串）统一成可编辑的键值对
+function checksToPairs(checks) {
+  if (Array.isArray(checks)) return checks.map((v) => ({ key: String(v), value: String(v) }))
+  if (typeof checks === 'string') return [{ key: 'value', value: checks }]
+  if (checks && typeof checks === 'object') {
+    return Object.entries(checks).map(([key, value]) => ({
+      key,
+      value: value == null ? '' : String(value)
+    }))
+  }
+  return []
+}
+
+function stepFromRaw(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {}
+  const extras = {}
+  for (const [key, value] of Object.entries(src)) {
+    if (!STEP_KNOWN_KEYS.includes(key)) extras[key] = value
+  }
+  const typeText = String(src.type || src.kind || '').trim().toLowerCase()
+  const manual = MANUAL_ALIASES.includes(typeText)
+  return {
+    uid: ++stepSeq,
+    id: String(src.id || ''),
+    name: String(src.name || ''),
+    type: manual ? 'manual' : 'auto',
+    case: String(src.case || ''),
+    resource: String(src.resource || ''),
+    sop: typeof src.sop === 'string' ? src.sop : '',
+    timeout_s: src.timeout_s == null ? '' : String(src.timeout_s),
+    step: Boolean(src.step || src.single_step || src.step_hold),
+    checks: checksToPairs(src.checks),
+    extras
+  }
+}
+
+function groupsFromTps(tps) {
+  const out = emptyGroups()
+  for (const group of STEP_GROUPS) {
+    const rows = Array.isArray(tps && tps[group.key]) ? tps[group.key] : []
+    out[group.key] = rows.map(stepFromRaw)
+  }
+  return out
+}
+
+function pairsToChecks(pairs) {
+  const out = {}
+  for (const pair of pairs || []) {
+    const key = String((pair && pair.key) || '').trim()
+    const value = String((pair && pair.value) || '').trim()
+    if (!value) continue
+    out[key || value] = value
+  }
+  return out
+}
+
+// 表单条目 -> 清单条目：manual 不写 case，auto 不写 resource / sop
+function serializeStep(step) {
+  const out = { ...step.extras }
+  out.id = step.id
+  out.name = step.name
+  delete out.kind
+  delete out.step
+  delete out.single_step
+  delete out.step_hold
+  if (step.type === 'manual') {
+    out.type = 'manual'
+    delete out.case
+    if (step.resource) out.resource = step.resource
+    else delete out.resource
+    if (step.sop) out.sop = step.sop
+    else delete out.sop
+  } else {
+    delete out.type
+    out.case = step.case
+    delete out.resource
+    delete out.sop
+    if (step.step) out.step = true
+  }
+  const checks = pairsToChecks(step.checks)
+  if (Object.keys(checks).length) out.checks = checks
+  else delete out.checks
+  const timeout = Number(step.timeout_s)
+  if (String(step.timeout_s).trim() !== '' && Number.isFinite(timeout)) out.timeout_s = timeout
+  else delete out.timeout_s
+  return out
+}
+
+function serializeSteps() {
+  const out = {}
+  for (const group of STEP_GROUPS) {
+    const rows = (steps.value[group.key] || []).map(serializeStep)
+    // 清单里带显式顺序号（no）时按当前位置重排，避免上下移动后编号错位
+    rows.forEach((row, index) => {
+      if (row.no != null) row.no = index + 1
+    })
+    out[group.key] = rows
+  }
+  return out
+}
+
+function allStepIds() {
+  const ids = new Set()
+  for (const group of STEP_GROUPS) {
+    for (const step of steps.value[group.key] || []) if (step.id) ids.add(step.id)
+  }
+  return ids
+}
+
+function nextStepId(section, type) {
+  const used = allStepIds()
+  if (type === 'manual') {
+    let n = 1
+    while (used.has(`M${n}`)) n += 1
+    return `M${n}`
+  }
+  const group = STEP_GROUPS.find((g) => g.key === section) || STEP_GROUPS[1]
+  const pad = STEP_ID_PAD[section] || 2
+  let n = 1
+  for (;;) {
+    const id = `${group.prefix}${String(n).padStart(pad, '0')}`
+    if (!used.has(id)) return id
+    n += 1
+  }
+}
+
+function addStep() {
+  const section = activeGroup.value
+  steps.value[section].push({
+    uid: ++stepSeq,
+    id: nextStepId(section, 'auto'),
+    name: '',
+    type: 'auto',
+    case: '',
+    resource: '',
+    sop: '',
+    timeout_s: '',
+    step: false,
+    checks: [],
+    extras: {}
+  })
+  applyStructured()
+}
+
+function removeStep(index) {
+  steps.value[activeGroup.value].splice(index, 1)
+  applyStructured()
+}
+
+function moveStep(index, delta) {
+  const list = steps.value[activeGroup.value]
+  const target = index + delta
+  if (target < 0 || target >= list.length) return
+  const [row] = list.splice(index, 1)
+  list.splice(target, 0, row)
+  applyStructured()
+}
+
+function onStepTypeChange(step) {
+  // 人工确认默认给 5 分钟等待，避免忘填超时
+  if (step.type === 'manual' && String(step.timeout_s).trim() === '') step.timeout_s = '300'
+  applyStructured()
+}
+
+function addCheck(step) {
+  step.checks.push({ key: '', value: '' })
+  applyStructured()
+}
+
+function removeCheck(step, index) {
+  step.checks.splice(index, 1)
+  applyStructured()
+}
+
+function openSop(step) {
+  sopNotice.value = ''
+  sopTarget.value = { step }
+}
+
+function onSopSaved(res) {
+  const target = sopTarget.value
+  sopTarget.value = null
+  if (!target) return
+  if (res && res.resource) target.step.resource = res.resource
+  if (!target.step.name && res && res.title) target.step.name = res.title
+  target.step.sop = '' // 文件成为唯一事实源
+  sopNotice.value = `SOP 已保存：${target.step.resource || '（未返回路径）'}`
+  applyStructured()
+}
+
+// 清单原文 -> 结构化表单（步骤、基础字段、解析器、工序、常数一起回填）
+function applyJsonToForm() {
+  error.value = ''
+  let parsed
+  try {
+    parsed = JSON.parse(rawJson.value)
+  } catch (e) {
+    error.value = `清单原文 JSON 解析失败：${e.message}`
+    return
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    error.value = '清单原文必须是 JSON 对象'
+    return
+  }
+  applyTps(parsed)
+}
+
+// 键序无关的深比较：判断 JSON 里的步骤段是否被手改过
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    const body = Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(',')
+    return `{${body}}`
+  }
+  return JSON.stringify(value)
+}
 
 // ---------------- 用例代码 ----------------
 // 文件树、编辑与保存全部交给 CodeWorkspace，本页不再持有代码状态
@@ -129,7 +381,9 @@ function applyStructured() {
   base.version = draft.value.version
   base.project = draft.value.project
   base.dut = draft.value.dut
-  base.deploy = draft.value.deploy || []
+  // deploy 可缺省，但后端不接受空数组：没有条目时整段删掉
+  if ((draft.value.deploy || []).length) base.deploy = draft.value.deploy
+  else delete base.deploy
   base.device_config = draft.value.device_config || {}
   if (parserName.value) base.parser = { name: parserName.value, version: parserRuntime.value }
   else delete base.parser
@@ -142,6 +396,11 @@ function applyStructured() {
   else delete base.constant_bindings
   if (rows.length) base.constant_model = { ...rows[0], models: [...rows[0].models] }
   else delete base.constant_model
+  const groups = serializeSteps()
+  for (const group of STEP_GROUPS) {
+    if (groups[group.key].length) base[group.key] = groups[group.key]
+    else delete base[group.key]
+  }
   draft.value = JSON.parse(JSON.stringify(base))
   rawJson.value = JSON.stringify(base, null, 2)
 }
@@ -386,7 +645,8 @@ function save() {
   payload.project = draft.value.project
   payload.dut = draft.value.dut
   // 结构化区域以页面选择为准（部署表格直接编辑 draft，也在此合并）
-  payload.deploy = draft.value.deploy || []
+  if ((draft.value.deploy || []).length) payload.deploy = draft.value.deploy
+  else delete payload.deploy
   payload.device_config = draft.value.device_config || {}
   if (parserName.value) payload.parser = { name: parserName.value, version: parserRuntime.value }
   else delete payload.parser
@@ -402,6 +662,19 @@ function save() {
   } else {
     delete payload.constant_bindings
     delete payload.constant_model
+  }
+  const groups = serializeSteps()
+  const jsonSections = [payload.setup, payload.cmd_suit, payload.teardown].map((v) =>
+    Array.isArray(v) ? v : []
+  )
+  if (stableJson(jsonSections) !== stableJson([groups.setup, groups.cmd_suit, groups.teardown])) {
+    error.value =
+      '清单原文里的 setup / cmd_suit / teardown 与「用例步骤」表单不一致：请先点「应用到表单」把 JSON 回填，再保存'
+    return
+  }
+  for (const group of STEP_GROUPS) {
+    if (groups[group.key].length) payload[group.key] = groups[group.key]
+    else delete payload[group.key]
   }
   delete payload.steps
   delete payload._raw
@@ -424,6 +697,9 @@ function applyTps(val) {
   draft.value = JSON.parse(JSON.stringify(val))
   rawJson.value = JSON.stringify(val, null, 2)
   bindings.value = initialBindings(val)
+  steps.value = groupsFromTps(val)
+  sopTarget.value = null
+  sopNotice.value = ''
   rowPns.value = {}
   rowModels.value = {}
   parserName.value = (val.parser || {}).name || val.schema || ''
@@ -447,13 +723,13 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="card">
+  <div class="card" data-testid="tps-editor">
     <div class="row" style="justify-content: space-between">
       <h2>{{ draft.name || draft.id }}</h2>
       <div class="row">
         <span class="tag">{{ (draft.parser && draft.parser.name) || draft.schema || 'tps.v2' }}</span>
         <span v-if="summary && summary.updated_at" class="muted">{{ summary.updated_at }}</span>
-        <button class="primary" @click="save">保存</button>
+        <button class="primary" data-testid="tps-save" @click="save">保存</button>
       </div>
     </div>
 
@@ -591,6 +867,97 @@ onMounted(() => {
       <button class="tool danger row-del" title="删除这一行" @click="removeBinding(i)">✕</button>
     </div>
 
+    <h3>用例步骤</h3>
+    <div v-if="sopNotice" class="ok" data-testid="step-sop-notice">{{ sopNotice }}</div>
+    <div class="step-head">
+      <div class="step-tabs">
+        <button
+          v-for="g in STEP_GROUPS"
+          :key="g.key"
+          class="step-tab"
+          :data-testid="`step-tab-${g.key}`"
+          :class="{ on: activeGroup === g.key }"
+          @click="activeGroup = g.key"
+        >
+          {{ g.label }}<span class="step-count">{{ steps[g.key].length }}</span>
+        </button>
+      </div>
+      <button class="mini" data-testid="step-add" @click="addStep">＋ 添加条目</button>
+    </div>
+    <p class="hint">
+      自动条目调用 <span class="mono">testcase</span> 实现；人工条目由 Runner 弹窗展示 SOP 等操作员确认。
+      manual 与 case 互斥，保存时由后端校验。
+    </p>
+
+    <div v-if="!currentSteps.length" class="step-empty">
+      <span class="muted">{{ activeGroupLabel }}暂无条目</span>
+      <button class="mini" data-testid="step-add-empty" @click="addStep">＋ 添加条目</button>
+    </div>
+
+    <div v-for="(s, i) in currentSteps" :key="s.uid" class="step-row" data-testid="step-row">
+      <div class="step-main">
+        <span class="row-no mono">{{ i + 1 }}</span>
+        <span class="step-id mono" data-testid="step-id">{{ s.id || '无 id' }}</span>
+        <input v-model="s.name" class="step-name" placeholder="条目名称" @input="applyStructured" />
+        <select v-model="s.type" class="step-type" data-testid="step-type" @change="onStepTypeChange(s)">
+          <option value="auto">自动执行 auto</option>
+          <option value="manual">人工确认 manual</option>
+        </select>
+        <button class="tool" title="上移" :disabled="i === 0" @click="moveStep(i, -1)">↑</button>
+        <button class="tool" title="下移" :disabled="i === currentSteps.length - 1" @click="moveStep(i, 1)">↓</button>
+        <button class="tool danger" title="删除条目" @click="removeStep(i)">✕</button>
+      </div>
+
+      <div v-if="s.type === 'auto'" class="step-body">
+        <label class="grow">用例入口 case
+          <input v-model="s.case" class="mono" placeholder="testcase.impl::main" @input="applyStructured" />
+        </label>
+        <label class="narrow">超时 timeout_s
+          <input v-model="s.timeout_s" type="number" min="0" placeholder="—" @input="applyStructured" />
+        </label>
+        <label class="check step-hold">
+          <input type="checkbox" v-model="s.step" @change="applyStructured" />
+          单步暂停
+        </label>
+      </div>
+
+      <div v-else class="step-body">
+        <div class="sop-line">
+          <span class="mono sop-path" :title="s.resource || s.sop">
+            {{ s.resource || (s.sop ? '（内联 sop 文本）' : '未设置 SOP') }}
+          </span>
+          <button class="mini" data-testid="step-sop-edit" @click="openSop(s)">编辑 SOP</button>
+          <span v-if="!s.resource && !s.sop" class="warn-tip">人工条目需要 SOP，保存前请先编辑</span>
+        </div>
+        <label class="narrow">超时 timeout_s
+          <input v-model="s.timeout_s" type="number" min="0" placeholder="300" @input="applyStructured" />
+        </label>
+      </div>
+
+      <div v-if="s.type === 'auto'" class="checks">
+        <span class="hint">阈值 checks</span>
+        <div v-for="(c, ci) in s.checks" :key="ci" class="check-row">
+          <input v-model="c.key" class="ck-key mono" placeholder="value" @input="applyStructured" />
+          <span class="muted mono">→</span>
+          <input v-model="c.value" class="ck-val mono" placeholder="TC_MAIN" @input="applyStructured" />
+          <button class="tool danger" title="删除阈值" @click="removeCheck(s, ci)">✕</button>
+        </div>
+        <button class="mini" @click="addCheck(s)">＋ 阈值</button>
+      </div>
+    </div>
+
+    <SopEditorDialog
+      v-if="sopTarget"
+      :key="sopTarget.step.uid"
+      :tps-id="draft.id"
+      :step-id="sopTarget.step.id"
+      :name="sopTarget.step.name"
+      :resource="sopTarget.step.resource"
+      :sop="sopTarget.step.sop"
+      @close="sopTarget = null"
+      @saved="onSopSaved"
+    />
+
     <h3>用例代码</h3>
     <CodeWorkspace :tps-id="draft.id" @saved="onCodeSaved" />
 
@@ -624,15 +991,19 @@ onMounted(() => {
     <button style="margin-top: 8px" @click="addDeploy">新增部署条目</button>
 
     <details class="raw">
-      <summary>清单原文 JSON（testconfig / cmd_suit / setup / teardown）</summary>
+      <summary>清单原文 JSON（testconfig / checks / 其余字段）</summary>
       <p class="muted">
-        结构化区域（基础字段、解析器、工序、设备、常数、部署）以页面选择为准；此处适合编辑 testconfig / cmd_suit / setup / teardown，保存时整体提交。
+        setup / cmd_suit / teardown 由「用例步骤」维护，表单改动会即时回写这里；直接改 JSON 后请先点「应用到表单」，
+        否则保存时会提示两侧不一致。
       </p>
       <textarea v-model="rawJson" rows="18" spellcheck="false"></textarea>
+      <div class="row" style="margin-top: 8px">
+        <button class="mini" @click="applyJsonToForm">应用到表单</button>
+      </div>
     </details>
 
     <div class="row" style="margin-top: 14px; justify-content: flex-end">
-      <button class="primary" @click="save">保存</button>
+      <button class="primary" data-testid="tps-save-bottom" @click="save">保存</button>
     </div>
   </div>
 </template>
@@ -877,6 +1248,176 @@ label {
   font-weight: 600;
   color: var(--accent);
   margin-bottom: 8px;
+}
+
+/* ---------------- 用例步骤 ---------------- */
+.step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.step-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.step-tab {
+  padding: 5px 10px;
+  font-size: 12px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.step-tab:hover:not(:disabled) {
+  color: var(--accent);
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.step-tab.on {
+  background: var(--panel);
+  border-color: var(--border);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(var(--accent-rgb), 0.12);
+}
+
+.step-count {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: rgba(var(--accent-rgb), 0.1);
+  font-size: 10.5px;
+}
+
+.step-empty {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+}
+
+.step-row {
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.step-row:hover {
+  border-color: var(--border-strong);
+}
+
+.step-main {
+  display: grid;
+  grid-template-columns: 20px 62px minmax(0, 1fr) 136px 22px 22px 22px;
+  gap: 8px;
+  align-items: center;
+}
+
+.step-id {
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.step-name {
+  min-width: 0;
+}
+
+.step-type {
+  padding: 5px 7px;
+  font-size: 12px;
+}
+
+.step-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 12px;
+  margin: 8px 0 0 28px;
+}
+
+.step-body .grow {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.step-body .narrow {
+  flex: 0 0 110px;
+}
+
+.step-hold {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 8px;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.step-hold input {
+  width: auto;
+}
+
+.sop-line {
+  display: flex;
+  flex: 1 1 320px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding-bottom: 6px;
+}
+
+.sop-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.warn-tip {
+  font-size: 11px;
+  color: var(--warn);
+}
+
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 8px 0 0 28px;
+}
+
+.check-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ck-key {
+  width: 92px;
+}
+
+.ck-val {
+  width: 124px;
+}
+
+.check-row input {
+  padding: 4px 6px;
+  font-size: 12px;
 }
 
 .warn-box {
