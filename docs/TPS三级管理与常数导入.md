@@ -22,7 +22,7 @@
 | --- | --- |
 | 左侧文件树 | 从 `GET /files` 的扁平路径构建目录树；`＋ 文件`、`＋ 文件夹`、重命名、删除；`.py` 归「源码」，`.md/.json/.yaml` 归「资源」；可切换显示隐藏项 |
 | 右侧编辑器 | CodeMirror 6 + `@codemirror/lang-python`：Python 语法高亮、行号、括号匹配、代码折叠、Tab 缩进 4 空格、`Ctrl+S` 保存 |
-| 保存 | `PUT /api/v1/tps/{id}/files/{path}`，保存后提示「已保存 路径（N 字节）」，未保存显示 `● 未保存` |
+| 保存 | `PUT /api/v1/tps/{id}/files/{path}`，保存后提示「已保存 路径（N 字节）」，未保存显示 `● 未保存`；按钮与 `Ctrl+S` 均可触发（`Ctrl+S` 已于 2026-11-22 修正：异步 `save()` 被同步 keymap 误判为已处理，实际不落盘） |
 | 切换保护 | 有未保存修改时切换文件会提示「保存后切换 / 仍然切换 / 取消」 |
 
 构建产物：`index-P7X4Jk8M.js` 约 545 KB（CodeMirror 占主要部分），构建正常。
@@ -70,7 +70,8 @@ Runner 用例会真实拉起一个 Controller（独立临时数据目录）再�
 ## 七、已知限制
 
 1. 编辑器无自动补全与跳转定义，仅语法高亮与基础编辑；
-2. 保存前不做 Python 语法检查，语法错误要等 Runner 执行才暴露；
-3. `context` 的 `catalog` 每次遍历所有版本，版本/PN 很多时打开编辑器会变慢，未做缓存；
-4. 前端主包体积偏大（CodeMirror 未做代码分割），构建有 500 KB 警告；
-5. Runner 用例依赖 `D:\ATE\MockController` 存在，缺该工程时会 skip 联动部分。
+2. 页面上有多个「保存」按钮（编辑器 / TPS 清单 / 页脚），仅 `.editor-bar` 内那个保存代码文件，误点其余按钮只保存清单；
+3. 保存前不做 Python 语法检查，语法错误要等 Runner 执行才暴露；
+4. `context` 的 `catalog` 每次遍历所有版本，版本/PN 很多时打开编辑器会变慢，未做缓存；
+5. 前端主包体积偏大（CodeMirror 未做代码分割），构建有 500 KB 警告；
+6. Runner 用例依赖 `D:\ATE\MockController` 存在，缺该工程时会 skip 联动部分。

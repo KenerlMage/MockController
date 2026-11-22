@@ -183,7 +183,15 @@ function createView() {
       bracketMatching(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       keymap.of([
-        { key: 'Mod-s', run: () => (save() ? true : false), preventDefault: true },
+        {
+          key: 'Mod-s',
+          preventDefault: true,
+          // run 必须同步返回布尔值；save() 是异步，这里触发后立即返回 true 以吞掉默认行为
+          run: () => {
+            void save()
+            return true
+          }
+        },
         ...defaultKeymap,
         ...historyKeymap,
         ...foldKeymap,
