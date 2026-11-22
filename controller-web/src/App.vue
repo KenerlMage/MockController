@@ -180,8 +180,11 @@ onMounted(async () => {
   flex-direction: column;
   gap: 14px;
   padding: 0 14px 14px;
-  background: linear-gradient(180deg, #fbfaff 0%, #ffffff 42%, #faf9ff 100%);
+  background:
+    radial-gradient(120% 60% at 0% 0%, rgba(59, 130, 246, 0.1) 0%, transparent 60%),
+    linear-gradient(180deg, #f7faff 0%, #ffffff 44%, #f4f8ff 100%);
   border-right: 1px solid var(--border);
+  box-shadow: 1px 0 0 rgba(29, 78, 216, 0.04);
 }
 
 .side-top-rule {
@@ -262,7 +265,7 @@ onMounted(async () => {
   height: 38px;
   flex: 0 0 38px;
   border-radius: 9px;
-  background: linear-gradient(135deg, #8b5cf6, #5b21b6);
+  background: linear-gradient(135deg, #3b82f6, #1e40af);
   color: #fff;
   font-size: 18px;
   box-shadow: 0 3px 12px rgba(var(--accent-rgb), 0.3);
@@ -278,7 +281,7 @@ onMounted(async () => {
   font-size: 15px;
   font-weight: 900;
   letter-spacing: 1.2px;
-  background: linear-gradient(180deg, #4c1d95 0%, #6d28d9 46%, #8b5cf6 78%, #6d28d9 100%);
+  background: linear-gradient(180deg, #1e3a8a 0%, #1d4ed8 46%, #3b82f6 78%, #1d4ed8 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -289,8 +292,8 @@ onMounted(async () => {
 
 .brand-name em {
   font-style: normal;
-  color: #7c3aed;
-  -webkit-text-fill-color: #7c3aed;
+  color: #2563eb;
+  -webkit-text-fill-color: #2563eb;
 }
 
 .brand-sub {

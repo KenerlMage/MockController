@@ -3,6 +3,7 @@ import { computed, reactive, ref } from 'vue'
 import { api } from '../api.js'
 import { buildBomItems } from '../bomPayload.js'
 import ModalShell from './ModalShell.vue'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
   preset: { type: Object, required: true },
@@ -93,7 +94,7 @@ async function save() {
 <template>
   <ModalShell
     :title="`BOM 编辑 · ${preset.id}`"
-    :subtitle="`${preset.name || ''}　设备别名 / 设备类型 / 资源描述符；保存时整张 BOM 覆盖写回`"
+    :subtitle="`${preset.name || ''}　每行一台设备：别名 / 类型 / 资源描述符；保存时整张 BOM 覆盖写回`"
     width="1120px"
     @close="emit('close')"
   >
@@ -149,14 +150,14 @@ async function save() {
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td colspan="4" class="muted">暂无行，点击下方「＋ 追加一行」开始填写</td>
+          <td colspan="4" class="muted">暂无设备，点击下方「添加设备」开始填写</td>
         </tr>
       </tbody>
     </table>
 
     <div class="editor-foot">
-      <button @click="addRow">＋ 追加一行</button>
-      <span class="muted">共 {{ rows.length }} 行</span>
+      <button class="add-device" data-testid="bom-editor-add" @click="addRow"><AppIcon name="add" :size="12" /> 添加设备</button>
+      <span class="muted">共 {{ rows.length }} 台设备</span>
       <span class="spacer"></span>
       <span class="muted">
         模板来源：{{ templateSource === 'api' ? 'device-templates 接口' : '内置后备清单' }}
@@ -166,7 +167,7 @@ async function save() {
     <template #foot>
       <button @click="emit('close')">取消</button>
       <button class="primary" :disabled="saving" @click="save">
-        {{ saving ? '保存中…' : `保存 ${rows.length} 行 BOM` }}
+        {{ saving ? '保存中…' : `保存 ${rows.length} 台设备` }}
       </button>
     </template>
   </ModalShell>
@@ -233,6 +234,13 @@ select.bad {
   color: var(--err);
   border-color: var(--err);
   box-shadow: none;
+}
+
+.add-device {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
 }
 
 .editor-foot {

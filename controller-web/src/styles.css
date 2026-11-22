@@ -1,30 +1,31 @@
 /* ============================================================
-   MockController · 全局主题（与 MockRunner 一致：白底 + 工业紫）
+   MockController · 全局主题（白底 + 工程蓝）
    ------------------------------------------------------------
    改配色只改这里的变量；半透明底色统一 rgba(var(--accent-rgb), 透明度)。
    --primary / --primary-soft 为历史别名，指向同一套主色，旧视图无需改动。
+   蓝色系：主色 azure 700，辅助 500/400，底色带冷蓝灰，网格极淡。
    ============================================================ */
 :root {
-  /* 底色：白底 + 淡紫工业网格 */
+  /* 底色：白底 + 冷蓝工业网格 */
   --bg: #ffffff;
-  --bg-soft: #faf9ff;
+  --bg-soft: #f4f8ff;
   --panel: #ffffff;
-  --panel-2: #f5f2fd;
-  --panel-3: #ede8fb;
-  --border: #e4def6;
-  --border-strong: #cec3ec;
-  --grid: rgba(109, 40, 217, 0.045);
+  --panel-2: #eef4ff;
+  --panel-3: #e1ebfe;
+  --border: #dbe6f8;
+  --border-strong: #b9cdf0;
+  --grid: rgba(29, 78, 216, 0.05);
 
   /* 文字 */
-  --text: #1d1733;
-  --muted: #6e688a;
+  --text: #0e1b33;
+  --muted: #5a6b88;
 
-  /* 主色：工业紫 */
-  --accent: #6d28d9;
-  --accent-2: #8b5cf6;
-  --accent-3: #a78bfa;
-  --accent-rgb: 109, 40, 217;
-  --accent-2-rgb: 139, 92, 246;
+  /* 主色：工程蓝 */
+  --accent: #1d4ed8;
+  --accent-2: #3b82f6;
+  --accent-3: #60a5fa;
+  --accent-rgb: 29, 78, 216;
+  --accent-2-rgb: 59, 130, 246;
 
   /* 旧视图别名 */
   --primary: var(--accent);
@@ -98,7 +99,7 @@ button:hover:not(:disabled) {
 
 button.primary,
 .btn.primary {
-  background: linear-gradient(135deg, #7c3aed, #6d28d9);
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
   border-color: transparent;
   color: #fff;
   font-weight: 600;

@@ -490,7 +490,7 @@ onMounted(async () => {
     <p v-else class="muted">{{ requestsLoading ? '读取中…' : '暂无审批单' }}</p>
 
     <h3>标定类 TPS 标识位置</h3>
-    <div class="row" style="gap: 8px; align-items: center">
+    <div class="badge-row">
       <select v-model="badgePos" data-testid="constants-badge-pos">
         <option value="before">名称前</option>
         <option value="after">名称后</option>
@@ -901,25 +901,66 @@ select.tiny {
 }
 
 .mc-ops h3 {
-  margin: 14px 0 6px;
+  margin: 16px 0 8px;
+  padding-left: 8px;
+  border-left: 3px solid var(--accent-2);
   font-size: 13px;
+  line-height: 1.2;
+}
+
+.mc-ops table {
+  margin-bottom: 4px;
+}
+
+.badge-row {
+  display: grid;
+  grid-template-columns: 220px auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.badge-row select {
+  width: 100%;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 12.5px;
+  background: #fff;
 }
 
 .req-form {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 140px) auto;
   gap: 8px;
   align-items: center;
   margin-bottom: 8px;
 }
 
+@media (max-width: 1100px) {
+  .req-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .req-form input,
 .req-form select {
-  padding: 5px 8px;
+  width: 100%;
+  padding: 6px 9px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 7px;
   font: inherit;
   font-size: 12.5px;
+  background: #fff;
+}
+
+.req-form .primary {
+  white-space: nowrap;
+  padding: 6px 14px;
+}
+
+.mc-ops .row button {
+  white-space: nowrap;
 }
 
 .badge.pending {
