@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """const_import（SR01-AR01 全量导入 / SR01-AR02 部分导入与备份）单元测试。
 
 全部用 tmp_path 独立库与临时树目录，不碰 repo/ 与 controller.db。
@@ -21,11 +21,13 @@ from fastapi.testclient import TestClient
 
 import ate_db
 import const_import
+import const_package
 import constants
 
 VERSION = "2026.11.01"
 PRODUCT = "1000-A"
-SIGNATURE = "ate-controller-export-v1"
+SOURCE_SYSTEM = "MCS"
+LEGACY_SELF_SIGNATURE = "ate-controller-export-v1"
 _OMIT = object()
 
 
@@ -100,22 +102,36 @@ def _zip_bytes(files: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
+def _digest(entries: list[dict]) -> str:
+    lines = sorted(f"{e['path']}:{e['sha256']}" for e in entries)
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
 def _manifest_bytes(
     files: dict[str, bytes],
     version: str,
-    signature: object = SIGNATURE,
+    signature: object = _OMIT,
     extra: dict | None = None,
+    source: object = SOURCE_SYSTEM,
 ) -> bytes:
     entries = [
         {"path": path, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
         for path, data in files.items()
     ]
     manifest: dict = {
-        "schema": "ate.constants.v2",
+        "contract": "mcs.constants.export/v1",
         "version": version,
+        "batch_id": f"MCS-{version}",
         "exported_at": "2026-11-22T10:00:00+08:00",
+        "content_digest": _digest(entries),
         "files": entries,
     }
+    if source is not _OMIT:
+        manifest["source"] = (
+            {"system": source, "system_version": "3.2.1",
+             "exported_at": "2026-11-22T10:00:00+08:00"}
+            if isinstance(source, str) else source
+        )
     if signature is not _OMIT:
         manifest["signature"] = signature
     if extra:
@@ -126,10 +142,11 @@ def _manifest_bytes(
 def _package(
     files: dict[str, bytes],
     version: str = VERSION,
-    signature: object = SIGNATURE,
+    signature: object = _OMIT,
     extra: dict | None = None,
+    source: object = SOURCE_SYSTEM,
 ) -> bytes:
-    bundle = {"manifest.json": _manifest_bytes(files, version, signature, extra)}
+    bundle = {"manifest.json": _manifest_bytes(files, version, signature, extra, source)}
     bundle.update(files)
     return _zip_bytes(bundle)
 
@@ -325,13 +342,13 @@ def test_package_limits_rejected(db, monkeypatch):
     before = _snapshot(db)
 
     with monkeypatch.context() as patch:
-        patch.setattr(constants, "IMPORT_MAX_ZIP_BYTES", len(blob) - 1)
+        patch.setattr(const_package, "MAX_ZIP_BYTES", len(blob) - 1)
         result = const_import.import_full(blob, "too-big.zip", "alice", db_path=db)
     assert result["success"] is False
     assert "上限" in result["message"]
 
     with monkeypatch.context() as patch:
-        patch.setattr(constants, "IMPORT_MAX_ZIP_FILES", 2)
+        patch.setattr(const_package, "MAX_ZIP_FILES", 2)
         result = const_import.import_full(blob, "too-many.zip", "alice", db_path=db)
     assert result["success"] is False
     assert "上限" in result["message"]
@@ -445,19 +462,39 @@ def test_partial_import_overwrites_and_backs_up(db):
     assert {r["field_key"]: r["value"] for r in values} == {"gain_offset": "1.0"}
 
 
-def test_partial_import_requires_signature(db):
-    _import_baseline(db)
-    before = _snapshot(db)
-    files = _partial_files()
+def test_partial_import_rejects_controller_export_package(db):
+    """本系统导出的备份包不能走导入通道（SR01-AR09）。"""
+    files = {"SPM/SPM_RH.xml": _xml("SPM_RH", "SPM-RH-01", [_field("gain_offset")])}
+    blob = _package(files, signature=LEGACY_SELF_SIGNATURE)
+    result = const_import.import_partial(blob, "backup.zip", "bob", db_path=db)
+    assert result["success"] is False
+    assert "备份" in result["message"]
 
-    for signature in (_OMIT, "", "   "):
-        result = const_import.import_partial(
-            _package(files, signature=signature), "unsigned.zip", "bob", db_path=db
-        )
-        assert result["success"] is False, result
-        assert "signature" in result["message"] or "签名" in result["message"]
 
-    assert _snapshot(db) == before
+def test_import_rejects_missing_source_system(db):
+    """缺少来源系统无法确认包由谁导出，必须拒绝（SR01-AR09）。"""
+    files = {"SPM/SPM_RH.xml": _xml("SPM_RH", "SPM-RH-01", [_field("gain_offset")])}
+    blob = _package(files, source=_OMIT)
+    result = const_import.import_full(blob, "no-source.zip", "bob", db_path=db)
+    assert result["success"] is False
+    assert "来源系统" in result["message"]
+
+
+def test_import_rejects_unknown_source_system(db):
+    files = {"SPM/SPM_RH.xml": _xml("SPM_RH", "SPM-RH-01", [_field("gain_offset")])}
+    blob = _package(files, source="UNKNOWN_TOOL")
+    result = const_import.import_full(blob, "unknown.zip", "bob", db_path=db)
+    assert result["success"] is False
+    assert "白名单" in result["message"]
+
+
+def test_import_rejects_content_digest_mismatch(db):
+    """内容摘要与逐文件哈希不一致：整包拒绝，库不动（SR01-AR09）。"""
+    files = {"SPM/SPM_RH.xml": _xml("SPM_RH", "SPM-RH-01", [_field("gain_offset")])}
+    blob = _package(files, extra={"content_digest": "0" * 64})
+    result = const_import.import_full(blob, "digest.zip", "bob", db_path=db)
+    assert result["success"] is False
+    assert "摘要" in result["message"]
 
 
 def test_partial_import_same_package_is_idempotent(db):

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """机器常数导入（需求 SR01-AR01 全量导入 / SR01-AR02 部分导入与备份留存）
 
 包格式
@@ -53,6 +53,7 @@ from typing import Any, Optional
 from xml.etree import ElementTree as ET
 
 import ate_db
+import const_package
 import constants
 
 __all__ = [
@@ -189,161 +190,38 @@ def _read_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo, limit: int, name: st
     return b"".join(chunks)
 
 
-def _read_package(blob: bytes, filename: str = "", *, require_signature: bool) -> dict:
-    """解包 + 清单校验 + 逐文件 sha256；任何不符抛 ValueError（调用方未写库）。"""
-    if isinstance(blob, (bytearray, memoryview)):
-        blob = bytes(blob)
-    if not isinstance(blob, bytes):
-        raise ValueError("导入内容必须是二进制 zip")
-    if not blob:
-        raise ValueError("导入内容为空")
-    limit_mb = constants.IMPORT_MAX_ZIP_BYTES // (1024 * 1024)
-    if len(blob) > constants.IMPORT_MAX_ZIP_BYTES:
-        raise ValueError(f"压缩包超过 {limit_mb}MB 上限（实际 {len(blob)} 字节）")
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(blob))
-    except zipfile.BadZipFile:
-        raise ValueError("导入内容不是有效的 ZIP 文件")
+def _read_package(blob: bytes, filename: str = "", *, require_external: bool = True) -> dict:
+    """解析并核验 MCS 导出包（信任根在 MCS，不在本系统）。
 
-    with zf:
-        entries: dict[str, zipfile.ZipInfo] = {}
-        for info in zf.infolist():
-            if info.is_dir():
-                continue
-            name = _norm_entry(info.filename)
-            if not name or name.startswith("__MACOSX/"):
-                continue
-            if name.rsplit("/", 1)[-1].lower() in NOISE_NAMES:
-                continue
-            if len(entries) >= constants.IMPORT_MAX_ZIP_FILES:
-                raise ValueError(
-                    f"压缩包内文件超过 {constants.IMPORT_MAX_ZIP_FILES} 个上限"
-                )
-            if name in entries:
-                raise ValueError(f"压缩包内存在重名文件: {name}")
-            entries[name] = info
-        if not entries:
-            raise ValueError("压缩包内没有文件")
-
-        manifests = [n for n in entries if n.rsplit("/", 1)[-1].lower() == MANIFEST_NAME]
-        if not manifests:
-            raise ValueError(
-                "包内缺少 manifest.json：导入包必须是带清单的标准包（逐文件 SHA-256 校验的唯一依据）"
-            )
-        if len(manifests) > 1:
-            raise ValueError(f"包内存在多个 manifest.json: {'、'.join(sorted(manifests))}")
-        manifest_path = manifests[0]
-        prefix = manifest_path[: -len(MANIFEST_NAME)]
-
-        try:
-            raw_manifest = _read_entry(
-                zf, entries[manifest_path], 1024 * 1024, MANIFEST_NAME
-            )
-        except ValueError as exc:
-            raise ValueError(f"manifest.json 读取失败: {exc}")
-        except Exception as exc:  # noqa: BLE001 - 损坏条目给出明确原因
-            raise ValueError(f"manifest.json 读取失败: {exc}")
-        try:
-            manifest = json.loads(raw_manifest.decode("utf-8-sig"))
-        except UnicodeDecodeError:
-            raise ValueError("manifest.json 不是 UTF-8 编码")
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"manifest.json 不是有效 JSON（第 {exc.lineno} 行第 {exc.colno} 列）"
-            )
-        if not isinstance(manifest, dict):
-            raise ValueError("manifest.json 顶层必须是对象")
-
-        version = _text(manifest.get("version") or manifest.get("constant_version"), 48)
-        if version and not constants.VERSION_RE.match(version):
-            raise ValueError(f"manifest.json 的版本号不合法（字母/数字/._+-，最长 48）: {version}")
-
-        files_raw = manifest.get("files")
-        if not isinstance(files_raw, list) or not files_raw:
-            raise ValueError("manifest.json 缺少 files 清单（每项需 path / sha256 / size）")
-        if len(files_raw) > constants.IMPORT_MAX_ZIP_FILES:
-            raise ValueError(
-                f"清单文件数超过 {constants.IMPORT_MAX_ZIP_FILES} 个上限（{len(files_raw)} 个）"
-            )
-
-        declared: dict[str, dict] = {}
-        total = 0
-        for idx, item in enumerate(files_raw):
-            where = f"清单第 {idx + 1} 项"
-            if not isinstance(item, dict):
-                raise ValueError(f"{where} 不是对象")
-            rel = _safe_rel(str(item.get("path") or ""))
-            digest = _text(item.get("sha256"), 64).lower()
-            if not re.fullmatch(r"[0-9a-f]{64}", digest):
-                raise ValueError(f"{where}（{rel}）的 sha256 必须是 64 位十六进制")
-            try:
-                size = int(item.get("size"))
-            except (TypeError, ValueError):
-                raise ValueError(f"{where}（{rel}）的 size 不是整数")
-            if size < 0:
-                raise ValueError(f"{where}（{rel}）的 size 不能为负")
-            if size > constants.IMPORT_MAX_FILE_BYTES:
-                raise ValueError(
-                    f"{where}（{rel}）超过单文件 "
-                    f"{constants.IMPORT_MAX_FILE_BYTES // (1024 * 1024)}MB 上限"
-                )
-            key = prefix + rel
-            if key in declared:
-                raise ValueError(f"清单重复声明文件: {rel}")
-            declared[key] = {"path": rel, "sha256": digest, "size": size}
-            total += size
-            if total > constants.IMPORT_MAX_ZIP_BYTES:
-                raise ValueError(f"清单内文件合计超过 {limit_mb}MB 上限")
-
-        content_names = [n for n in entries if n != manifest_path]
-        missing = sorted(n for n in declared if n not in entries)
-        if missing:
-            raise ValueError(f"清单声明的文件在包内不存在: {'、'.join(missing[:5])}")
-        extra = sorted(n for n in content_names if n not in declared)
-        if extra:
-            raise ValueError(
-                f"包内存在清单未声明的文件，整包拒绝: {'、'.join(extra[:5])}"
-            )
-
-        payloads: dict[str, bytes] = {}
-        for key, meta in declared.items():
-            try:
-                data = _read_entry(zf, entries[key], meta["size"], meta["path"])
-            except ValueError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                raise ValueError(f"文件 {meta['path']} 读取失败: {exc}")
-            if len(data) != meta["size"]:
-                raise ValueError(
-                    f"文件 {meta['path']} 大小与清单不符（清单 {meta['size']}，实际 {len(data)}）"
-                )
-            actual = _sha256(data)
-            if actual != meta["sha256"]:
-                raise ValueError(
-                    f"文件 {meta['path']} 的 SHA-256 与清单不符"
-                    f"（清单 {meta['sha256'][:12]}…，实际 {actual[:12]}…），整包拒绝"
-                )
-            payloads[key] = data
-
-    signature = _text(manifest.get("signature"), 200)
-    if require_signature and not signature:
+    ``require_external`` 为真时额外拒绝"本系统导出的备份包"，
+    避免把备份包当新模型打进产线。
+    """
+    pkg = const_package.parse_package(blob, filename)
+    if require_external and pkg.get("legacy_self_export"):
         raise ValueError(
-            "非本系统导出的标准包（manifest.json 缺少 signature 签名），部分导入已拒绝"
+            "该包是本系统（Controller）导出的备份包，导入通道只接受外部机器常数系统（MCS）的导出包；"
+            "如需回到旧版本请用备份回滚"
         )
-
     return {
-        "filename": _text(filename, 200),
-        "package_hash": _sha256(blob),
-        "size": len(blob),
-        "version": version,
-        "label": _text(manifest.get("label"), 120),
-        "source": _text(manifest.get("source") or manifest.get("exporter"), 200),
-        "note": _text(manifest.get("note"), 400),
-        "reason": _text(manifest.get("reason"), 200),
-        "signature": signature,
-        "file_count": len(declared),
-        "files": [declared[k] for k in declared],
-        "payloads": payloads,
+        "filename": pkg["filename"],
+        "package_hash": pkg["package_hash"],
+        "size": pkg["size"],
+        "version": pkg["version"],
+        "label": pkg["label"],
+        "source": pkg["source_system"] + (
+            f" {pkg['source_version']}" if pkg["source_version"] else ""
+        ),
+        "source_system": pkg["source_system"],
+        "source_version": pkg["source_version"],
+        "exported_at": pkg["exported_at"],
+        "batch_id": pkg["batch_id"] or pkg["content_digest"][:12],
+        "content_digest": pkg["content_digest"],
+        "signature_status": pkg["signature_status"],
+        "note": pkg["note"],
+        "reason": pkg["reason"],
+        "file_count": pkg["file_count"],
+        "files": pkg["files"],
+        "payloads": pkg["payloads"],
     }
 
 
@@ -515,8 +393,14 @@ def _doc_from_xml(name: str, data: bytes, manifest_version: str) -> dict:
                 f"{'、'.join(missing[:5])}"
             )
 
+    # 模板 / 标定实例分类：文件名与 XML 内容必须一致，矛盾即拒绝（SR01-AR10）
+    kind_info = const_package.classify(name, module=module, calibrated=is_instance, sn=sn)
+
     return {
         "file": name,
+        "kind": kind_info["kind"],
+        "sn": kind_info["sn"],
+        "checksum": const_package.sha256_hex(data),
         "declared_version": declared_version,
         "payloads": [
             {
@@ -634,13 +518,81 @@ def _collect(docs: list[dict], manifest_version: str) -> tuple[str, list[dict]]:
     return version, groups
 
 
-def _prepare(blob: bytes, filename: str, *, require_signature: bool) -> dict:
-    """读取 + 校验 + 解析，全部成功才返回；失败只抛 ValueError，不碰数据库。"""
-    pkg = _read_package(blob, filename, require_signature=require_signature)
+def _prepare(
+    blob: bytes,
+    filename: str,
+    *,
+    models: Optional[list[str]] = None,
+    subsystems: Optional[list[str]] = None,
+) -> dict:
+    """读取 + 核验 + 解析；模板与实例分开返回，失败不碰数据库。"""
+    pkg = _read_package(blob, filename)
     docs = _parse_documents(pkg["payloads"], pkg["version"])
-    version, groups = _collect(docs, pkg["version"])
+
+    templates = [d for d in docs if d.get("kind") == "template"]
+    instances = [d for d in docs if d.get("kind") == "instance"]
+
+    # 子集筛选：按模型键或子系统，未命中的一律不动
+    wanted = {_text(m, 64) for m in (models or []) if _text(m, 64)}
+    subs = {_text(x, 64).upper() for x in (subsystems or []) if _text(x, 64)}
+    if wanted:
+        templates = [t for t in templates if t["payloads"][0]["models"][0]["model_key"] in wanted]
+        instances = [i for i in instances if i["payloads"][0]["models"][0]["model_key"] in wanted]
+    if subs:
+        def _hit(doc: dict) -> bool:
+            payloads = doc.get("payloads") or []
+            return bool(payloads and _text(payloads[0].get("subsystem"), 64).upper() in subs)
+        templates = [t for t in templates if _hit(t)]
+        instances = [i for i in instances if _hit(i)]
+    if (wanted or subs) and not templates and not instances:
+        raise ValueError("按给定模型/子系统筛选后，包内没有可导入的内容")
+
+    if templates:
+        version, groups = _collect(templates, pkg["version"])
+    else:
+        version, groups = pkg["version"], []
     stats = _stats(groups)
-    return {**pkg, "version": version, "groups": groups, "stats": stats}
+    return {**pkg, "version": version, "groups": groups, "instances": instances, "stats": stats}
+
+
+def _write_instances(conn: sqlite3.Connection, instances: list[dict], *, version: str,
+                     batch_id: str, now: str) -> list[dict]:
+    """标定实例写入 const_calibration（键 SN+模型+版本），不覆盖结构模板。"""
+    written: list[dict] = []
+    for doc in instances:
+        payload = (doc.get("payloads") or [{}])[0]
+        models = payload.get("models") or [{}]
+        model = models[0]
+        sn = _text(doc.get("sn"), 64)
+        pn = _text(payload.get("pn"), 64)
+        key = _text(model.get("model_key"), 64)
+        if not sn or not pn or not key:
+            raise ValueError(f"{doc.get('file')}: 标定实例缺少 sn / pn / model_key")
+        values = model.get("values") or {}
+        conn.execute(
+            "INSERT INTO const_calibration "
+            "(sn, pn, model_key, version, values_json, source_tps, task_id, operator, checksum, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (sn, pn, key, version, json.dumps(values, ensure_ascii=False), f"MCS:{batch_id}",
+             "", "", _text(doc.get("checksum"), 64), now),
+        )
+        written.append({"sn": sn, "pn": pn, "model_key": key, "version": version,
+                        "field_count": len(values)})
+    return written
+
+
+def _log_package(conn: sqlite3.Connection, pkg: dict, *, template_count: int,
+                 instance_count: int, operator: str, now: str) -> int:
+    cur = conn.execute(
+        "INSERT INTO const_package "
+        "(batch_id, source_system, source_version, exported_at, package_hash, content_digest, "
+        " template_count, instance_count, signature_status, operator, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (pkg["batch_id"], pkg["source_system"], pkg["source_version"], pkg["exported_at"],
+         pkg["package_hash"], pkg["content_digest"], template_count, instance_count,
+         pkg["signature_status"], operator, now),
+    )
+    return int(cur.lastrowid or 0)
 
 
 def _stats(groups: list[dict]) -> dict:
@@ -901,12 +853,14 @@ def _same_import(
 # ---------------------------------------------------------------- 全量导入
 
 
-def import_full(blob: bytes, filename: str = "", operator: str = "", db_path=None) -> dict:
-    """SR01-AR01：整包校验通过后清空重建，写 full 导入日志。"""
+def import_full(blob: bytes, filename: str = "", operator: str = "", db_path=None,
+                models: Optional[list[str]] = None, subsystems: Optional[list[str]] = None,
+                purge_calibrations: bool = False) -> dict:
+    """SR01-AR01：MCS 包校验通过后替换模板库；SN 实例入标定库。"""
     operator = _text(operator, 64)
     filename = _text(filename, 200)
     try:
-        pkg = _prepare(blob, filename, require_signature=False)
+        pkg = _prepare(blob, filename, models=models, subsystems=subsystems)
     except ValueError as exc:
         return _fail(str(exc), filename=filename, version="", stats={})
 
@@ -966,9 +920,19 @@ def import_full(blob: bytes, filename: str = "", operator: str = "", db_path=Non
                 for model in group["models"]:
                     _upsert_model(conn, version, group["pn"], product, subsystem, model, now)
                     _write_values(conn, version, group["pn"], model, now)
+            if purge_calibrations:
+                conn.execute("DELETE FROM const_calibration")
+            instances_written = _write_instances(
+                conn, pkg["instances"], version=version, batch_id=pkg["batch_id"], now=now
+            )
+            package_id = _log_package(
+                conn, pkg, template_count=stats["model_count"],
+                instance_count=len(instances_written), operator=operator, now=now,
+            )
             note = (
-                f"{filename or '未命名包'}：{pkg['file_count']} 个文件 / "
-                f"{stats['model_count']} 个模型 / {stats['field_count']} 个字段"
+                f"{filename or '未命名包'}｜MCS 批次 {pkg['batch_id']}｜"
+                f"{pkg['file_count']} 个文件 / {stats['model_count']} 个模板 / "
+                f"{len(instances_written)} 个实例 / {stats['field_count']} 个字段"
             )
             log_id = _log(
                 conn,
@@ -999,6 +963,11 @@ def import_full(blob: bytes, filename: str = "", operator: str = "", db_path=Non
         "already_imported": False,
         "version": version,
         "prev_version": prev_version,
+        "batch_id": pkg["batch_id"],
+        "source_system": pkg["source_system"],
+        "signature_status": pkg["signature_status"],
+        "package_id": package_id,
+        "instance_count": len(instances_written),
         "stats": stats,
         "package_hash": pkg["package_hash"],
         "file_count": pkg["file_count"],
@@ -1012,12 +981,13 @@ def import_full(blob: bytes, filename: str = "", operator: str = "", db_path=Non
 # ---------------------------------------------------------------- 部分导入
 
 
-def import_partial(blob: bytes, filename: str = "", operator: str = "", db_path=None) -> dict:
-    """SR01-AR02：只接受带 signature 的标准包；命中覆盖、未命中追加，旧结构进备份。"""
+def import_partial(blob: bytes, filename: str = "", operator: str = "", db_path=None,
+                   models: Optional[list[str]] = None, subsystems: Optional[list[str]] = None) -> dict:
+    """SR01-AR02：MCS 标准包按子集导入；命中覆盖、未命中追加，旧结构进备份。"""
     operator = _text(operator, 64)
     filename = _text(filename, 200)
     try:
-        pkg = _prepare(blob, filename, require_signature=True)
+        pkg = _prepare(blob, filename, models=models, subsystems=subsystems)
     except ValueError as exc:
         return _fail(str(exc), filename=filename, version="", stats={})
 
@@ -1084,9 +1054,17 @@ def import_partial(blob: bytes, filename: str = "", operator: str = "", db_path=
                     _upsert_model(conn, version, pn, product, subsystem, model, now)
                     _write_values(conn, version, pn, model, now, keep_from=keep_from)
             _refresh_version(conn, version)
+            instances_written = _write_instances(
+                conn, pkg["instances"], version=version, batch_id=pkg["batch_id"], now=now
+            )
+            package_id = _log_package(
+                conn, pkg, template_count=stats["model_count"],
+                instance_count=len(instances_written), operator=operator, now=now,
+            )
             note = (
-                f"{filename or '未命名包'}：{pkg['file_count']} 个文件，覆盖 {replaced} 个模型、"
-                f"新增 {added} 个模型"
+                f"{filename or '未命名包'}｜MCS 批次 {pkg['batch_id']}｜"
+                f"{pkg['file_count']} 个文件，覆盖 {replaced} 个模型、新增 {added} 个模型、"
+                f"实例 {len(instances_written)} 个"
             )
             log_id = _log(
                 conn,
@@ -1122,8 +1100,86 @@ def import_partial(blob: bytes, filename: str = "", operator: str = "", db_path=
         "file_count": pkg["file_count"],
         "files": pkg["files"],
         "log_id": log_id,
+        "batch_id": pkg["batch_id"],
+        "source_system": pkg["source_system"],
+        "signature_status": pkg["signature_status"],
+        "package_id": package_id,
+        "instance_count": len(instances_written),
         "message": message,
     }
+
+
+# ---------------------------------------------------------------- 预检 / 实例查询
+
+
+def verify_package(blob: bytes, filename: str = "") -> dict:
+    """SR01-AR09：只预检不入库，返回来源、批次、摘要、签名状态与文件分类。"""
+    pkg = _prepare(blob, filename)
+    templates = []
+    instances = []
+    for group in pkg["groups"]:
+        for model in group["models"]:
+            templates.append({
+                "pn": group["pn"], "model_key": model["model_key"],
+                "field_count": len(model.get("fields") or []),
+                "subsystem": group.get("subsystem", ""),
+            })
+    for doc in pkg["instances"]:
+        payload = (doc.get("payloads") or [{}])[0]
+        model = ((payload.get("models") or [{}])[0])
+        instances.append({
+            "file": doc["file"], "sn": doc["sn"], "pn": payload.get("pn"),
+            "model_key": model.get("model_key"),
+            "field_count": len(model.get("values") or {}),
+        })
+    return {
+        "success": True,
+        "message": f"预检通过：{len(templates)} 个模板、{len(instances)} 个标定实例",
+        "version": pkg["version"],
+        "batch_id": pkg["batch_id"],
+        "source_system": pkg["source_system"],
+        "source_version": pkg["source_version"],
+        "exported_at": pkg["exported_at"],
+        "content_digest": pkg["content_digest"],
+        "package_hash": pkg["package_hash"],
+        "signature_status": pkg["signature_status"],
+        "templates": templates,
+        "instances": instances,
+        "stats": pkg["stats"],
+    }
+
+
+def list_calibrations(sn: str = "", pn: str = "", model_key: str = "", limit: int = 100,
+                      db_path=None) -> dict:
+    """SR01-AR10：按 SN / 模型查标定实例。"""
+    sql = ("SELECT id, sn, pn, model_key, version, values_json, source_tps, checksum, created_at "
+           "FROM const_calibration WHERE 1=1")
+    args: list[Any] = []
+    if _text(sn, 64):
+        sql += " AND UPPER(sn) = ?"
+        args.append(_text(sn, 64).upper())
+    if _text(pn, 64):
+        sql += " AND UPPER(pn) = ?"
+        args.append(_text(pn, 64).upper())
+    if _text(model_key, 64):
+        sql += " AND model_key = ?"
+        args.append(_text(model_key, 64))
+    sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    args.append(max(1, min(int(limit or 100), 500)))
+    with _connect(db_path) as conn:
+        rows = conn.execute(sql, args).fetchall()
+    items = []
+    for row in rows:
+        try:
+            values = json.loads(row["values_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            values = {}
+        items.append({
+            "id": row["id"], "sn": row["sn"], "pn": row["pn"], "model_key": row["model_key"],
+            "version": row["version"], "values": values, "source": row["source_tps"],
+            "checksum": row["checksum"], "created_at": row["created_at"],
+        })
+    return {"success": True, "count": len(items), "items": items}
 
 
 # ---------------------------------------------------------------- 备份查询 / 回滚
@@ -1345,6 +1401,9 @@ def register_routes(app, base_dir, db_path=None) -> None:
                 _text(body.get("filename"), 200),
                 _text(body.get("operator"), 64),
                 db_path=db_file,
+                models=body.get("models") or None,
+                subsystems=body.get("subsystems") or None,
+                purge_calibrations=bool(body.get("purge_calibrations")),
             )
         except ValueError as exc:
             return _fail(str(exc))
@@ -1361,11 +1420,44 @@ def register_routes(app, base_dir, db_path=None) -> None:
                 _text(body.get("filename"), 200),
                 _text(body.get("operator"), 64),
                 db_path=db_file,
+                models=body.get("models") or None,
+                subsystems=body.get("subsystems") or None,
             )
         except ValueError as exc:
             return _fail(str(exc))
         except Exception as exc:  # noqa: BLE001
             return _fail(f"部分导入失败: {exc}")
+
+    @app.post("/api/v1/constants/packages/verify")
+    def const_package_verify(payload: Any = Body(default=None)):
+        try:
+            body = _body(payload)
+            blob = _decode_base64(body.get("content_base64"))
+            return verify_package(blob, _text(body.get("filename"), 200))
+        except ValueError as exc:
+            return _fail(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return _fail(f"预检失败: {exc}")
+
+    @app.get("/api/v1/constants/calibrations")
+    def const_calibrations(sn: str = "", pn: str = "", model_key: str = "", limit: str = "100"):
+        try:
+            return list_calibrations(sn, pn, model_key, int(limit or 100), db_path=db_file)
+        except Exception as exc:  # noqa: BLE001
+            return _fail(f"读取标定实例失败: {exc}", items=[], count=0)
+
+    @app.get("/api/v1/constants/packages")
+    def const_packages(limit: str = "50"):
+        try:
+            with _connect(db_file) as conn:
+                rows = conn.execute(
+                    "SELECT * FROM const_package ORDER BY created_at DESC, id DESC LIMIT ?",
+                    (max(1, min(int(limit or 50), 200)),),
+                ).fetchall()
+            return {"success": True, "count": len(rows),
+                    "items": [{k: row[k] for k in row.keys()} for row in rows]}
+        except Exception as exc:  # noqa: BLE001
+            return _fail(f"读取导入批次失败: {exc}", items=[], count=0)
 
     @app.get("/api/v1/constants/backups")
     def const_backups(pn: str = "", model_key: str = "", limit: str = "100"):

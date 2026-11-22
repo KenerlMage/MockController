@@ -1,4 +1,4 @@
-<script setup>
+﻿<script setup>
 import { computed, onMounted, ref } from 'vue'
 import { api, constantsPaths } from '../api.js'
 import ModalShell from '../components/ModalShell.vue'
@@ -424,7 +424,7 @@ onMounted(async () => {
       </div>
     </div>
     <p class="muted">
-      全量导入会校验包内每个文件的 SHA-256，任一不符整包拒绝、库不动；部分导入只接受本系统标准导出包，覆盖旧模型时旧结构进入备份。
+      包由外部机器常数系统（MCS）导出。全量导入校验来源白名单、内容摘要与逐文件 SHA-256，任一不符整包拒绝、库不动；部分导入可按模型子集导入，覆盖旧模型时旧结构进入备份；本系统导出的备份包在这两处一律拒绝。
     </p>
     <div v-if="opMsg" class="ok">{{ opMsg }}</div>
     <div v-if="opErr" class="error">{{ opErr }}</div>

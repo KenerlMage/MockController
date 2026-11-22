@@ -248,6 +248,24 @@ CREATE TABLE IF NOT EXISTS const_push_log (
     created_at TEXT
 );
 
+-- 外部常数系统（MCS）导入批次台账（SR01-AR09）
+CREATE TABLE IF NOT EXISTS const_package (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id       TEXT,
+    source_system  TEXT NOT NULL,
+    source_version TEXT,
+    exported_at    TEXT,
+    package_hash   TEXT,
+    content_digest TEXT,
+    template_count INTEGER DEFAULT 0,
+    instance_count INTEGER DEFAULT 0,
+    signature_status TEXT,
+    operator       TEXT,
+    created_at     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_const_package_batch ON const_package (batch_id, created_at);
+
 -- 下位机字段映射（下位机字段 -> 模型字段，含换算）
 CREATE TABLE IF NOT EXISTS const_field_mapping (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
