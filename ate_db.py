@@ -140,6 +140,130 @@ CREATE TABLE IF NOT EXISTS constant_value (
     updated_at  TEXT,
     PRIMARY KEY (version, pn, model_key, field_key)
 );
+
+-- ============ 机器常数扩展（需求设计 SR01-AR01 ~ AR09 / SR02-AR09） ============
+-- 导入日志：全量 full / 部分 partial，记录前后版本与包哈希，便于追溯与回滚判断
+CREATE TABLE IF NOT EXISTS const_import_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL,
+    package_hash TEXT,
+    file_count   INTEGER DEFAULT 0,
+    prev_version TEXT,
+    new_version  TEXT,
+    operator     TEXT,
+    note         TEXT,
+    created_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_const_import_log_time ON const_import_log (created_at);
+
+-- 备份：被覆盖的旧模型结构，restore 时按 id 回灌
+CREATE TABLE IF NOT EXISTS const_backup (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    pn          TEXT NOT NULL,
+    model_key   TEXT NOT NULL,
+    version     TEXT NOT NULL,
+    product     TEXT,
+    subsystem   TEXT,
+    name        TEXT,
+    fields_json TEXT,
+    replaced_by TEXT,
+    reason      TEXT,
+    operator    TEXT,
+    restored_at TEXT,
+    created_at  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_const_backup_model ON const_backup (pn, model_key, created_at);
+
+-- 审批单：新建 create / 废弃 deprecate
+CREATE TABLE IF NOT EXISTS const_request (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL,
+    pn           TEXT NOT NULL,
+    model_key    TEXT NOT NULL,
+    product      TEXT,
+    subsystem    TEXT,
+    payload_json TEXT,
+    diff_json    TEXT,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    applicant    TEXT,
+    approver     TEXT,
+    reason       TEXT,
+    created_at   TEXT,
+    decided_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_const_request_status ON const_request (status, created_at);
+
+-- 审批权限：产品领域 x 审批类型 -> 用户组
+CREATE TABLE IF NOT EXISTS const_approval_role (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    product  TEXT NOT NULL,
+    kind     TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    enabled  INTEGER DEFAULT 1,
+    updated_at TEXT,
+    UNIQUE (product, kind, group_id)
+);
+
+-- 用户组申请
+CREATE TABLE IF NOT EXISTS const_group_apply (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    username   TEXT NOT NULL,
+    group_id   TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending',
+    reason     TEXT,
+    decided_by TEXT,
+    created_at TEXT,
+    decided_at TEXT
+);
+
+-- 按 SN 的标定实例归档（一个 SN 一个模型的多个版本）
+CREATE TABLE IF NOT EXISTS const_calibration (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    sn         TEXT NOT NULL,
+    pn         TEXT NOT NULL,
+    model_key  TEXT NOT NULL,
+    version    TEXT,
+    values_json TEXT,
+    source_tps TEXT,
+    task_id    TEXT,
+    operator   TEXT,
+    checksum   TEXT,
+    created_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_const_calib_sn ON const_calibration (sn, pn, model_key, created_at);
+
+-- 审批结果推送日志（本轮 dry-run，不真实外发）
+CREATE TABLE IF NOT EXISTS const_push_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER,
+    channel    TEXT,
+    target     TEXT,
+    payload    TEXT,
+    status     TEXT,
+    error      TEXT,
+    created_at TEXT
+);
+
+-- 下位机字段映射（下位机字段 -> 模型字段，含换算）
+CREATE TABLE IF NOT EXISTS const_field_mapping (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    product     TEXT,
+    subsystem   TEXT,
+    pn          TEXT NOT NULL,
+    model_key   TEXT NOT NULL,
+    source_field TEXT NOT NULL,
+    target_field TEXT NOT NULL,
+    scale       REAL DEFAULT 1.0,
+    offset      REAL DEFAULT 0.0,
+    unit        TEXT,
+    required    INTEGER DEFAULT 1,
+    updated_at  TEXT,
+    UNIQUE (pn, model_key, source_field)
+);
 """
 
 

@@ -38,6 +38,147 @@ const zipSubsystems = computed(() => {
   return (prod && prod.subsystems) || []
 })
 
+// ================= 机器常数：全量/部分导入、备份、审批、标定徽标（SR01-AR01~AR07）=================
+const fullFileInput = ref(null)
+const partialFileInput = ref(null)
+const opRunning = ref('')
+const opMsg = ref('')
+const opErr = ref('')
+
+const backups = ref([])
+const backupsLoading = ref(false)
+
+const requests = ref([])
+const requestsLoading = ref(false)
+const reqForm = ref({ kind: 'create', pn: '', model_key: '', applicant: 'engineer' })
+const reqMsg = ref('')
+const reqErr = ref('')
+
+const badgePos = ref('before')
+const badgeMsg = ref('')
+
+async function readBase64(file) {
+  const buf = await file.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  let bin = ''
+  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i])
+  return btoa(bin)
+}
+
+async function runImport(kind, event) {
+  const file = event.target.files && event.target.files[0]
+  event.target.value = ''
+  if (!file) return
+  opRunning.value = kind
+  opMsg.value = ''
+  opErr.value = ''
+  try {
+    const res = await api.postConstantsImport(kind, {
+      filename: file.name,
+      content_base64: await readBase64(file),
+      operator: 'web'
+    })
+    if (res.success === false) opErr.value = res.message || '导入失败'
+    else opMsg.value = res.message || `导入成功：${res.models || 0} 个模型`
+  } catch (e) {
+    opErr.value = '导入失败：' + e.message
+  } finally {
+    opRunning.value = ''
+    await load()
+  }
+}
+
+async function loadBackups() {
+  backupsLoading.value = true
+  try {
+    const res = await api.constBackups()
+    backups.value = res.backups || []
+  } catch (e) {
+    opErr.value = '读取备份失败：' + e.message
+  } finally {
+    backupsLoading.value = false
+  }
+}
+
+async function restoreBackup(id) {
+  if (!window.confirm(`回滚备份 #${id} 到当前模型库？`)) return
+  try {
+    const res = await api.constRestoreBackup(id)
+    if (res.success === false) opErr.value = res.message || '回滚失败'
+    else opMsg.value = res.message || '已回滚'
+    await loadBackups()
+    await loadModels()
+  } catch (e) {
+    opErr.value = '回滚失败：' + e.message
+  }
+}
+
+async function loadRequests() {
+  requestsLoading.value = true
+  try {
+    const res = await api.constRequests()
+    requests.value = res.requests || []
+  } catch (e) {
+    reqErr.value = '读取审批单失败：' + e.message
+  } finally {
+    requestsLoading.value = false
+  }
+}
+
+async function submitRequest() {
+  reqMsg.value = ''
+  reqErr.value = ''
+  if (!reqForm.value.pn || !reqForm.value.model_key) {
+    reqErr.value = 'PN 与模型键都要填'
+    return
+  }
+  try {
+    const res = await api.constCreateRequest({ ...reqForm.value })
+    if (res.success === false) reqErr.value = res.message || '提交失败'
+    else reqMsg.value = `已提交审批单 #${res.id}（待审批期间 Runner 不可见）`
+    await loadRequests()
+  } catch (e) {
+    reqErr.value = '提交失败：' + e.message
+  }
+}
+
+async function decideRequest(row, approve) {
+  const approver = window.prompt('审批人（需属于有该产品审批权限的用户组）', 'sys_engineer') || ''
+  if (!approver) return
+  let reason = ''
+  if (!approve) {
+    reason = window.prompt('驳回理由（必填）', '') || ''
+    if (!reason.trim()) return
+  }
+  try {
+    const res = await api.constDecideRequest(row.id, { approve, approver, reason })
+    if (res.success === false) reqErr.value = res.message || '审批失败'
+    else reqMsg.value = approve ? `#${row.id} 已通过` : `#${row.id} 已驳回`
+    await loadRequests()
+  } catch (e) {
+    reqErr.value = '审批失败：' + e.message
+  }
+}
+
+async function loadBadge() {
+  try {
+    const res = await api.constBadge()
+    if (res && res.position) badgePos.value = res.position
+  } catch (e) {
+    /* 未挂载时用默认值 */
+  }
+}
+
+async function saveBadge() {
+  badgeMsg.value = ''
+  try {
+    const res = await api.constSetBadge({ position: badgePos.value })
+    badgeMsg.value = res.success === false ? res.message : '已保存'
+  } catch (e) {
+    badgeMsg.value = '保存失败：' + e.message
+  }
+}
+
 function base64Of(buffer) {
   const bytes = new Uint8Array(buffer)
   let binary = ''
@@ -220,6 +361,8 @@ function statValue(stats, key) {
 onMounted(async () => {
   await load()
   if (!fileVersion.value && versions.value.length) fileVersion.value = versions.value[0].version
+  // 新面板：备份 / 审批 / 徽标设置（接口未挂载时各自静默失败，不影响原有版本列表）
+  await Promise.all([loadBackups(), loadRequests(), loadBadge()])
 })
 </script>
 
@@ -262,6 +405,99 @@ onMounted(async () => {
         <span class="mono">{{ fileResult.filename || fileResult.version || '（文件）' }}</span>
         <span>{{ fileResult.message || fileError }}</span>
       </div>
+    </div>
+  </section>
+
+  <!-- 机器常数模型管理：全量/部分导入、备份、审批、标定徽标（SR01-AR01~AR07） -->
+  <section class="card mc-ops" data-testid="constants-ops">
+    <div class="row" style="justify-content: space-between">
+      <h2>模型导入与审批</h2>
+      <div class="row" style="gap: 8px">
+        <label class="btn file-btn" :class="{ busy: opRunning === 'full' }">
+          {{ opRunning === 'full' ? '导入中…' : '全量导入 zip' }}
+          <input type="file" accept=".zip" data-testid="constants-full-input" :disabled="!!opRunning" @change="runImport('full', $event)" />
+        </label>
+        <label class="btn file-btn" :class="{ busy: opRunning === 'partial' }">
+          {{ opRunning === 'partial' ? '导入中…' : '部分导入（标准导出包）' }}
+          <input type="file" accept=".zip" data-testid="constants-partial-input" :disabled="!!opRunning" @change="runImport('partial', $event)" />
+        </label>
+      </div>
+    </div>
+    <p class="muted">
+      全量导入会校验包内每个文件的 SHA-256，任一不符整包拒绝、库不动；部分导入只接受本系统标准导出包，覆盖旧模型时旧结构进入备份。
+    </p>
+    <div v-if="opMsg" class="ok">{{ opMsg }}</div>
+    <div v-if="opErr" class="error">{{ opErr }}</div>
+
+    <h3>备份（被覆盖的旧模型）</h3>
+    <div class="row" style="justify-content: space-between">
+      <span class="muted">{{ backups.length }} 条备份</span>
+      <button @click="loadBackups">刷新备份</button>
+    </div>
+    <table v-if="backups.length">
+      <thead>
+        <tr><th>#</th><th>PN</th><th>模型</th><th>版本</th><th>被谁覆盖</th><th>操作</th></tr>
+      </thead>
+      <tbody>
+        <tr v-for="b in backups" :key="b.id">
+          <td class="mono">{{ b.id }}</td>
+          <td class="mono">{{ b.pn }}</td>
+          <td class="mono">{{ b.model_key }}</td>
+          <td class="mono">{{ b.version }}</td>
+          <td class="mono">{{ b.replaced_by || '—' }}</td>
+          <td><button class="tiny" @click="restoreBackup(b.id)">回滚</button></td>
+        </tr>
+      </tbody>
+    </table>
+    <p v-else class="muted">{{ backupsLoading ? '读取中…' : '暂无备份' }}</p>
+
+    <h3>审批单（新建 / 废弃）</h3>
+    <div class="req-form">
+      <select v-model="reqForm.kind">
+        <option value="create">新建模型</option>
+        <option value="deprecate">废弃模型</option>
+      </select>
+      <input v-model="reqForm.pn" placeholder="PN" />
+      <input v-model="reqForm.model_key" placeholder="模型键" />
+      <input v-model="reqForm.applicant" placeholder="申请人" />
+      <button class="primary tiny" data-testid="constants-request-submit" @click="submitRequest">提交申请</button>
+    </div>
+    <div v-if="reqMsg" class="ok">{{ reqMsg }}</div>
+    <div v-if="reqErr" class="error">{{ reqErr }}</div>
+    <table v-if="requests.length">
+      <thead>
+        <tr><th>#</th><th>类型</th><th>PN / 模型</th><th>状态</th><th>申请人</th><th>操作</th></tr>
+      </thead>
+      <tbody>
+        <tr v-for="r in requests" :key="r.id">
+          <td class="mono">{{ r.id }}</td>
+          <td>{{ r.kind === 'create' ? '新建' : '废弃' }}</td>
+          <td class="mono">{{ r.pn }} / {{ r.model_key }}</td>
+          <td>
+            <span class="badge" :class="r.status">{{ r.status === 'pending' ? '待审批' : r.status === 'approved' ? '已通过' : '已驳回' }}</span>
+          </td>
+          <td>{{ r.applicant }}</td>
+          <td>
+            <template v-if="r.status === 'pending'">
+              <button class="tiny" @click="decideRequest(r, true)">通过</button>
+              <button class="tiny danger" @click="decideRequest(r, false)">驳回</button>
+            </template>
+            <span v-else class="muted">{{ r.approver || '—' }}</span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <p v-else class="muted">{{ requestsLoading ? '读取中…' : '暂无审批单' }}</p>
+
+    <h3>标定类 TPS 标识位置</h3>
+    <div class="row" style="gap: 8px; align-items: center">
+      <select v-model="badgePos" data-testid="constants-badge-pos">
+        <option value="before">名称前</option>
+        <option value="after">名称后</option>
+        <option value="icon">仅图标</option>
+      </select>
+      <button class="tiny" @click="saveBadge">保存</button>
+      <span v-if="badgeMsg" class="muted">{{ badgeMsg }}</span>
     </div>
   </section>
 
@@ -658,5 +894,46 @@ select.tiny {
 
 .fail-row:last-child {
   border-bottom: 0;
+}
+
+.mc-ops {
+  margin-bottom: 14px;
+}
+
+.mc-ops h3 {
+  margin: 14px 0 6px;
+  font-size: 13px;
+}
+
+.req-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.req-form input,
+.req-form select {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.badge.pending {
+  background: rgba(180, 83, 9, 0.12);
+  color: #b45309;
+}
+
+.badge.approved {
+  background: rgba(21, 128, 61, 0.12);
+  color: var(--ok);
+}
+
+.badge.rejected {
+  background: rgba(220, 38, 38, 0.1);
+  color: var(--err);
 }
 </style>

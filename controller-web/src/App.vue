@@ -11,16 +11,52 @@ import ConstantsView from './views/ConstantsView.vue'
 const health = ref(null)
 const error = ref('')
 
-// 左侧导航：与 Runner 一致的「图标 + 名称 + 说明 + 代号」三段式
+// 左侧导航：与 Runner 一致的「图标 + 名称 + 说明 + 代号」三段式。
+// 元数据为一级菜单，下挂三个二级项（装备树 / 机器常数 / 工序），见 SR01-AR08。
 const tabs = [
   { id: 'tps', icon: '▤', name: 'TPS 管理', desc: '清单 · 部署 · 常数绑定', code: 'TPS' },
   { id: 'packages', icon: '▣', name: '软件包', desc: '归档 · 版本 · 探测', code: 'PKG' },
-  { id: 'metadata', icon: '◈', name: '元数据', desc: '装备树 · 测试台 BOM', code: 'MDA' },
-  { id: 'processes', icon: '▦', name: '工序', desc: '工序清单 · 与装备树同级', code: 'PRC' },
-  { id: 'constants', icon: '≡', name: '机器常数', desc: '版本 · 模型 · 标定值', code: 'CST' }
+  {
+    id: 'metadata',
+    icon: '◈',
+    name: '元数据',
+    desc: '装备树 · 机器常数 · 工序',
+    code: 'MDA',
+    children: [
+      { id: 'metadata', testId: 'equipment', icon: '◈', name: '装备树', desc: '产品 · DUT · 测试台 BOM', code: 'TRE' },
+      { id: 'constants', icon: '≡', name: '机器常数', desc: '版本 · 模型 · 标定值', code: 'CST' },
+      { id: 'processes', icon: '▦', name: '工序', desc: '工序清单 · 与装备树同级', code: 'PRC' }
+    ]
+  }
 ]
 
-const current = computed(() => tabs.find((t) => t.id === store.tab))
+const METADATA_CHILD_IDS = ['metadata', 'constants', 'processes']
+
+// 二级项选中时，一级「元数据」保持高亮
+const isActive = (t) =>
+  store.tab === t.id || (Array.isArray(t.children) && t.children.some((c) => c.id === store.tab))
+
+const current = computed(() => {
+  // 先匹配二级项：装备树的 id 与一级「元数据」同名，先查 children 才不会显示成一级标题
+  for (const t of tabs) {
+    const child = (t.children || []).find((c) => c.id === store.tab)
+    if (child) return child
+    if (t.id === store.tab) return t
+  }
+  return tabs[0]
+})
+
+const expanded = ref(true)  // 二级菜单默认展开，避免元数据入口看起来是空的
+
+function pick(t) {
+  if (Array.isArray(t.children)) {
+    // 点一级一律展开并进入第一个二级项；收起由二级项的切换代替，避免"点了没反应"
+    expanded.value = true
+    if (!METADATA_CHILD_IDS.includes(store.tab)) store.switchTab(t.children[0].id)
+    return
+  }
+  store.switchTab(t.id)
+}
 
 onMounted(async () => {
   try {
@@ -63,22 +99,42 @@ onMounted(async () => {
 
       <!-- 垂直导航 -->
       <nav class="side-nav">
-        <button
-          v-for="t in tabs"
-          :key="t.id"
-          class="side-item"
-          :data-testid="`nav-${t.id}`"
-          :data-tab="t.id"
-          :class="{ active: store.tab === t.id }"
-          @click="store.switchTab(t.id)"
-        >
-          <span class="side-icon">{{ t.icon }}</span>
-          <span class="side-body">
-            <span class="side-name">{{ t.name }}</span>
-            <span class="side-desc">{{ t.desc }}</span>
-          </span>
-          <span class="side-code">{{ t.code }}</span>
-        </button>
+        <template v-for="t in tabs" :key="t.id">
+          <button
+            class="side-item"
+            :data-testid="`nav-${t.id}`"
+            :data-tab="t.id"
+            :class="{ active: isActive(t) }"
+            @click="pick(t)"
+          >
+            <span class="side-icon">{{ t.icon }}</span>
+            <span class="side-body">
+              <span class="side-name">
+                {{ t.name }}
+                <span v-if="t.children" class="side-caret">{{ expanded ? '▾' : '▸' }}</span>
+              </span>
+              <span class="side-desc">{{ t.desc }}</span>
+            </span>
+            <span class="side-code">{{ t.code }}</span>
+          </button>
+
+          <!-- 二级菜单：元数据下挂 装备树 / 机器常数 / 工序 -->
+          <div v-if="t.children && expanded" class="side-sub" :data-testid="`subnav-${t.id}`">
+            <button
+              v-for="c in t.children"
+              :key="c.id"
+              class="side-sub-item"
+              :data-testid="`nav-${c.testId || c.id}`"
+              :data-tab="c.id"
+              :class="{ active: store.tab === c.id }"
+              @click="store.switchTab(c.id)"
+            >
+              <span class="sub-icon">{{ c.icon }}</span>
+              <span class="sub-name">{{ c.name }}</span>
+              <span class="sub-code">{{ c.code }}</span>
+            </button>
+          </div>
+        </template>
       </nav>
 
       <!-- 底部：数据根 -->
@@ -130,6 +186,64 @@ onMounted(async () => {
 
 .side-top-rule {
   margin: 0 -14px 2px;
+}
+
+/* 二级菜单（元数据下的三个子项） */
+.side-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 6px 18px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+}
+
+.side-sub-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-sub-item:hover {
+  background: rgba(109, 40, 217, 0.06);
+  color: var(--accent);
+}
+
+.side-sub-item.active {
+  background: rgba(109, 40, 217, 0.1);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.sub-icon {
+  width: 14px;
+  text-align: center;
+  opacity: 0.85;
+}
+
+.sub-name {
+  flex: 1;
+}
+
+.sub-code {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  opacity: 0.65;
+}
+
+.side-caret {
+  margin-left: 4px;
+  font-size: 10px;
+  opacity: 0.7;
 }
 
 /* 品牌 */

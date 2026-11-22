@@ -9,6 +9,22 @@ const UNCLASSIFIED = '未归类'
 
 const items = ref([])
 const equipment = ref([]) // 装备树：产品 → 子系统 → 测试台类型
+// 标定类 TPS 徽标（SR01-AR07）：位置来自设置，缺省 before
+const badgePos = ref('before')
+
+function isCalibTps(t) {
+  return Boolean(t && (t.calibration === true || t.is_calibration === true || t.kind === 'calib'))
+}
+
+async function loadBadgePos() {
+  try {
+    const res = await api.constBadge()
+    if (res && res.position) badgePos.value = res.position
+  } catch (e) {
+    /* 接口未挂载时用默认 before，不影响清单 */
+  }
+}
+
 const selectedId = ref('')
 const tps = ref(null)
 const files = ref([])
@@ -372,6 +388,7 @@ async function importZip(event) {
 onMounted(async () => {
   // 先记住外部要求选中的编号：load() 会自动打开首条，不能让它覆盖目标
   const target = store.tpsFocusId
+  await loadBadgePos()
   await load()
   if (target) {
     collapsed.value = new Set()
@@ -488,7 +505,19 @@ watch(
                     >
                       <span class="icon">▤</span>
                       <span class="tps-name" :title="entry.t.id">
+                        <!-- 标定类 TPS 徽标：位置由「标定类 TPS 标识位置」设置决定（SR01-AR07） -->
+                        <span
+                          v-if="isCalibTps(entry.t) && badgePos !== 'after'"
+                          class="calib-mark"
+                          data-testid="tps-calib-badge"
+                          :title="badgePos === 'icon' ? '标定类 TPS' : ''"
+                        >{{ badgePos === 'icon' ? '标' : '标定' }}</span>
                         {{ entry.t.name || entry.t.id }}
+                        <span
+                          v-if="isCalibTps(entry.t) && badgePos === 'after'"
+                          class="calib-mark"
+                          data-testid="tps-calib-badge-after"
+                        >标定</span>
                         <span class="mono tps-id">{{ entry.t.id }}</span>
                       </span>
                       <span
@@ -706,6 +735,19 @@ h2 {
 }
 
 .name,
+.calib-mark {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(109, 40, 217, 0.12);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 16px;
+  vertical-align: 1px;
+}
+
 .tps-name {
   flex: 1;
   min-width: 0;

@@ -158,6 +158,24 @@ def _summary(raw: dict) -> dict:
         "constant_model_pn": legacy.get("pn", ""),
         "constant_model_version": legacy.get("version", ""),
         "deploy_count": len(deploy) if isinstance(deploy, list) else 0,
+        # 标定类 TPS：清单显式声明，或含 type=calib 的步骤（SR01-AR07）
+        "calibration": bool(
+            raw.get("calibration") is True
+            or raw.get("is_calibration") is True
+            or str(raw.get("tps_type") or "").lower() in ("calib", "calibration")
+            or any(
+                str((step or {}).get("type") or "").lower() in ("calib", "calibration")
+                or (step or {}).get("calibration") is True
+                for step in (raw.get("steps") or [])
+                if isinstance(step, dict)
+            )
+            or any(
+                str((case or {}).get("type") or "").lower() in ("calib", "calibration")
+                or (case or {}).get("calibration") is True
+                for case in (raw.get("cmd_suit") or [])
+                if isinstance(case, dict)
+            )
+        ),
         "updated_at": raw.get("updated_at", ""),
     }
 

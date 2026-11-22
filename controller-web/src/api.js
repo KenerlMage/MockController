@@ -159,3 +159,27 @@ export const api = {
   constantsImportFile: (payload) =>
     request(constantsPaths(payload.version).importFile, { method: 'POST', body: JSON.stringify(payload) })
 }
+
+
+// ================= 机器常数：导入 / 备份 / 审批 / 徽标（SR01-AR01~AR07）=================
+// 这些走契约路径 /api/v1/constants/*，由 const_import / const_approval / const_catalog 提供
+api.postConstantsImport = (kind, body) =>
+  request(`/api/v1/constants/import/${kind}`, { method: 'POST', body: JSON.stringify(body) })
+api.constBackups = (pn = '', modelKey = '') => {
+  const q = new URLSearchParams()
+  if (pn) q.set('pn', pn)
+  if (modelKey) q.set('model_key', modelKey)
+  const s = q.toString()
+  return request(`/api/v1/constants/backups${s ? '?' + s : ''}`)
+}
+api.constRestoreBackup = (id) =>
+  request(`/api/v1/constants/backups/${id}/restore`, { method: 'POST', body: JSON.stringify({ operator: 'web' }) })
+api.constRequests = (status = '') =>
+  request(`/api/v1/constants/requests${status ? '?status=' + encodeURIComponent(status) : ''}`)
+api.constCreateRequest = (body) =>
+  request('/api/v1/constants/requests', { method: 'POST', body: JSON.stringify(body) })
+api.constDecideRequest = (id, body) =>
+  request(`/api/v1/constants/requests/${id}/decide`, { method: 'POST', body: JSON.stringify(body) })
+api.constBadge = () => request('/api/v1/constants/calib-badge')
+api.constSetBadge = (body) =>
+  request('/api/v1/constants/calib-badge', { method: 'PUT', body: JSON.stringify(body) })

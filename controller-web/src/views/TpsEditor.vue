@@ -31,7 +31,7 @@ const parserMeta = ref([])
 const catalog = ref([]) // 归一化后 [{version, pn, models:[{model_key,name}]}]
 const rowPns = ref({}) // rowIndex -> 该版本 PN 列表
 const rowModels = ref({}) // rowIndex -> 该 PN 模型列表
-const bindings = ref([{ version: '', pn: '', models: [] }])
+const bindings = ref([{ version: '', pn: '', models: [], alias: '', source: 'default' }])
 
 // ---------------- 用例步骤（setup / cmd_suit / teardown） ----------------
 // 三个分组各一组条目；表单是步骤区的写入口，任何改动都即时回写清单原文 JSON
@@ -405,7 +405,8 @@ function applyStructured() {
   rawJson.value = JSON.stringify(base, null, 2)
 }
 
-// 保存用的绑定列表：丢掉未选版本的半成品行，去重
+// 保存用的绑定列表：丢掉未选版本的半成品行。
+// 同一模型允许重复添加（不同别名各占一行），因此去重键是 version|pn|alias（SR01-AR06）
 function cleanedBindings() {
   const out = []
   const seen = new Set()
@@ -413,10 +414,28 @@ function cleanedBindings() {
     const version = (b.version || '').trim()
     const pn = (b.pn || '').trim()
     if (!version) continue
-    const key = `${version}|${pn}`
+    const alias = (b.alias || '').trim()
+    const key = `${version}|${pn}|${alias}`
     if (seen.has(key)) continue
     seen.add(key)
-    out.push({ version, pn, models: [...(b.models || [])] })
+    out.push({ version, pn, models: [...(b.models || [])], alias, source: b.source || 'default' })
+  }
+  return out
+}
+
+// 把绑定行展开成逐模型列表，供后端 machine_constant_bindings 使用
+function expandedBindings() {
+  const out = []
+  for (const row of cleanedBindings()) {
+    for (const modelKeyValue of row.models) {
+      out.push({
+        version: row.version,
+        pn: row.pn,
+        model_key: modelKeyValue,
+        alias: row.alias || modelKeyValue,
+        source: row.source || 'default'
+      })
+    }
   }
   return out
 }
@@ -569,7 +588,7 @@ async function prepareRow(index) {
 function addBinding() {
   // 新行默认沿用上一行的版本，减少重复选择
   const last = bindings.value[bindings.value.length - 1]
-  bindings.value.push({ version: (last && last.version) || '', pn: '', models: [] })
+  bindings.value.push({ version: (last && last.version) || '', pn: '', models: [], alias: '', source: 'default' })
 }
 
 function removeBinding(index) {
@@ -659,9 +678,11 @@ function save() {
   if (rows.length) {
     payload.constant_bindings = rows
     payload.constant_model = { ...rows[0], models: [...rows[0].models] }
+    payload.machine_constant_bindings = expandedBindings()
   } else {
     delete payload.constant_bindings
     delete payload.constant_model
+    delete payload.machine_constant_bindings
   }
   const groups = serializeSteps()
   const jsonSections = [payload.setup, payload.cmd_suit, payload.teardown].map((v) =>
@@ -696,6 +717,7 @@ function initialBindings(val) {
 function applyTps(val) {
   draft.value = JSON.parse(JSON.stringify(val))
   rawJson.value = JSON.stringify(val, null, 2)
+  draft.value.calibration = val.calibration === true || val.is_calibration === true
   bindings.value = initialBindings(val)
   steps.value = groupsFromTps(val)
   sopTarget.value = null
@@ -776,6 +798,10 @@ onMounted(() => {
       <label>版本<input v-model="draft.version" /></label>
       <label>项目<input v-model="draft.project" /></label>
       <label>被测对象<input v-model="draft.dut" /></label>
+      <label class="check-line">
+        <input v-model="draft.calibration" type="checkbox" data-testid="tps-calib-toggle" />
+        标定类 TPS
+      </label>
     </div>
 
     <h3>解析器与工序</h3>
@@ -824,7 +850,7 @@ onMounted(() => {
     <h3>机器常数</h3>
     <div class="bind-head">
       <span class="hint">
-        每行一个「版本 + PN + 模型」绑定，可增删；保存写入 constant_bindings（首行同步 constant_model）
+        每行一个「版本 + PN + 模型」绑定，可增删；同一模型可用不同别名重复添加。保存写入 constant_bindings 与 machine_constant_bindings
       </span>
       <button class="mini" @click="addBinding">＋ 添加绑定</button>
     </div>
@@ -864,6 +890,16 @@ onMounted(() => {
         </div>
         <span v-else class="hint">{{ row.version ? '选 PN 后列出模型' : '先选版本' }}</span>
       </div>
+      <label class="cell cell-narrow">
+        <input v-model="row.alias" placeholder="别名（唯一）" title="同一模型重复添加时用别名区分" />
+      </label>
+      <label class="cell cell-narrow">
+        <select v-model="row.source" title="取值来源">
+          <option value="default">默认值</option>
+          <option value="version">指定版本</option>
+          <option value="sn">按 SN 标定值</option>
+        </select>
+      </label>
       <button class="tool danger row-del" title="删除这一行" @click="removeBinding(i)">✕</button>
     </div>
 
@@ -1179,6 +1215,16 @@ label {
   padding: 9px 11px;
   border: 1px dashed var(--border-strong);
   border-radius: 8px;
+}
+
+.cell-narrow {
+  flex: 0 0 128px;
+  min-width: 128px;
+}
+
+.cell-narrow input,
+.cell-narrow select {
+  width: 100%;
 }
 
 .binding-row {

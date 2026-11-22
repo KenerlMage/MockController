@@ -46,6 +46,15 @@ try:
 except Exception as exc:  # noqa: BLE001
     print(f"[warn] 常数模块未挂载: {exc}")
 
+# ---- 机器常数：导入 / 审批 / 目录（需求 SR01）----
+for _mod_name in ("const_import", "const_approval", "const_catalog"):
+    try:
+        _mod = __import__(_mod_name)
+        _mod.register_routes(app, REPO_ROOT, REPO_ROOT / "controller.db")
+        print(f"[ok] {_mod_name} 已挂载")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] {_mod_name} 未挂载: {exc}")
+
 # ---- 元数据（装备树 / BOM / 预设，自 Runner 迁入）----
 try:
     import metadata as metadata_mod  # noqa: E402
