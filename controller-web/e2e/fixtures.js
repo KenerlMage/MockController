@@ -26,7 +26,6 @@ export const BASE_URL = process.env.ATE_CTRL_URL || `http://127.0.0.1:${PORT}`
 const WEB_DIST = path.join(PROJECT_ROOT, 'web_dist')
 const SEED_ROOT = path.join(PROJECT_ROOT, 'repo')
 const STATE_FILE = path.join(os.tmpdir(), `ate-controller-e2e-${PORT}.json`)
-const DEFAULT_PYTHON = 'D:\\ATE\\MockRunner\\backend\\.venv\\Scripts\\python.exe'
 const SEED_ITEMS = ['tps', 'tree', 'processes.json', 'controller.db']
 const HEALTH_TIMEOUT_MS = 60_000
 
@@ -55,13 +54,19 @@ function ensureBuildFresh() {
 }
 
 function resolvePython() {
-  const candidates = [process.env.MOCK_CONTROLLER_PYTHON, DEFAULT_PYTHON].filter(Boolean)
+  // 优先环境变量；其次本工程 .venv、同级 MockRunner .venv；最后用 PATH 里的 python
+  const env = process.env.MOCK_CONTROLLER_PYTHON || process.env.ATE_PYTHON
+  if (env && fs.existsSync(env)) return env
+  const candidates = [
+    path.join(PROJECT_ROOT, '.venv', 'Scripts', 'python.exe'),
+    path.join(PROJECT_ROOT, '..', 'MockRunner', 'backend', '.venv', 'Scripts', 'python.exe'),
+    path.join(PROJECT_ROOT, '..', 'MockRunner', 'backend', '.venv', 'bin', 'python')
+  ]
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate
   }
-  throw new Error(
-    `找不到 Python 解释器。请设置 MOCK_CONTROLLER_PYTHON（默认尝试 ${DEFAULT_PYTHON}）`
-  )
+  // 允许直接使用 PATH 中的 python / python3（依赖已装在系统环境时）
+  return process.platform === 'win32' ? 'python' : 'python3'
 }
 
 async function probeHealth(url, timeoutMs = 1000) {

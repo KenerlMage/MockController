@@ -14,9 +14,14 @@ set "PORT=8070"
 set "UI_URL=http://127.0.0.1:%PORT%/ui/"
 
 rem ---------- 1/4 pick python ----------
-rem order: local .venv -> sibling MockRunner venv -> python on PATH
+rem order: ATE_PYTHON -> local .venv -> sibling MockRunner venv -> PATH
+rem portable: install Python in PATH, or set ATE_PYTHON to the interpreter.
 set "PY="
-if exist ".venv\Scripts\python.exe" (
+if defined ATE_PYTHON if exist "%ATE_PYTHON%" (
+  set "PY=%ATE_PYTHON%"
+  echo [1/4] python: ATE_PYTHON
+)
+if not defined PY if exist ".venv\Scripts\python.exe" (
   set "PY=%~dp0.venv\Scripts\python.exe"
   echo [1/4] python: local .venv
 )
@@ -31,20 +36,33 @@ if not defined PY (
 
 "%PY%" --version >nul 2>&1
 if errorlevel 1 (
-  echo [ERROR] Python not found. Install Python 3.10+ or create .venv first.
-  pause
-  exit /b 1
+  echo [1/4] python from PATH not found, trying to create local .venv...
+  python -m venv .venv >nul 2>&1
+  if exist ".venv\Scripts\python.exe" (
+    set "PY=%~dp0.venv\Scripts\python.exe"
+    echo [1/4] python: created local .venv
+  ) else (
+    echo [ERROR] Python 3.10+ is required. Install it and add to PATH, or set ATE_PYTHON.
+    pause
+    exit /b 1
+  )
 )
 
 rem ---------- 2/4 dependencies (install only when missing) ----------
+rem offline: put dependency wheels into .\wheels to install without network
 "%PY%" -c "import fastapi, uvicorn" >nul 2>&1
 if errorlevel 1 (
   echo [2/4] fastapi / uvicorn missing, installing...
-  "%PY%" -m pip install -r requirements.txt
+  if exist "wheels" (
+    "%PY%" -m pip install --no-index --find-links wheels -r requirements.txt
+  ) else (
+    "%PY%" -m pip install -r requirements.txt
+  )
   "%PY%" -c "import fastapi, uvicorn" >nul 2>&1
   if errorlevel 1 (
-    echo [ERROR] Dependency install failed. Check network and run manually:
-    echo         "%PY%" -m pip install -r requirements.txt
+    echo [ERROR] Dependency install failed. Offline option:
+    echo         1^) copy wheels into .\wheels
+    echo         2^) "%PY%" -m pip install --no-index --find-links wheels -r requirements.txt
     pause
     exit /b 1
   )

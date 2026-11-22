@@ -4,9 +4,9 @@ Runner 侧的货架清单与安装包原本随程序本地持有（assistant_she
 packages/<id>/），等价于远端下发的结果。迁移后 Controller 成为唯一事实源，
 Runner 改为通过 /api/v1/assistants 拉取。
 
-用法（在 D:\\ATE\\MockController 下）：
+用法（在 MockController 工程目录下）：
     python seed_assistants.py
-    python seed_assistants.py --source D:\\ATE\\MockRunner\\backend\\assistant_shelf
+    python seed_assistants.py --source ..\\MockRunner\\backend\\assistant_shelf
     python seed_assistants.py --repo D:\\tmp\\repo --channel demo
 
 可重复执行：每个助手先写到货架目录内的临时目录，算完 sha256 再整体替换，
@@ -25,7 +25,17 @@ from typing import Any
 
 import assistants
 
-DEFAULT_SOURCE = Path(r"D:\ATE\MockRunner\backend\assistant_shelf")
+def _default_source() -> Path:
+    """默认取同级 MockRunner 的货架；也可用 ATE_ASSISTANT_SHELF 指定。"""
+    import os
+
+    env = os.environ.get("ATE_ASSISTANT_SHELF") or ""
+    if env:
+        return Path(env).expanduser().resolve()
+    return (Path(__file__).resolve().parent.parent / "MockRunner" / "backend" / "assistant_shelf")
+
+
+DEFAULT_SOURCE = _default_source()
 DEFAULT_NOTE = "助手清单由 Controller 统一发布；Runner 通过 /api/v1/assistants 拉取清单与文件。"
 
 
