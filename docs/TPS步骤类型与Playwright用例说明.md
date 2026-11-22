@@ -115,3 +115,19 @@ npx playwright test
 - **浏览器兼容**：只在系统 Edge 上跑，Firefox/Safari 未验证；Controller 侧未做移动端视口回归。
 - **超时与中断**：`manual` 的 `timeout_s` 到点行为未写用例（仅代码路径存在），断网/断电恢复未覆盖。
 - **upgrade 路径**：旧 TPS（`options: next/abort/cancel`）只验证了兼容映射，未跑全量历史 TPS 回归。
+- **新增 manual 条目的持久化（仅 UI 层）**：Controller 的 03 用例验证了 SOP 落盘 `resource/<stepId>.md` 与回填，但没有在界面上点「保存 TPS 清单」把新增条目写回 `tps.json`；该链路由接口层的 06 用例覆盖，UI 侧属未覆盖。
+
+---
+
+## 六、委派与核验（谁做了什么、谁的说法被纠正）
+
+本轮 4 个子任务全部返回可用产出，无失败、无中止、无空回执；但自报里有两处与实际不符，均已实测纠正后才计入结论：
+
+| 子任务 | 自报 | 实测核验 | 处理 |
+| --- | --- | --- | --- |
+| Controller 步骤类型 + SOP | 已完成，手动实测通过 | 复核通过：`context.steps` 三段正确、SOP 74 字节落盘可读回、manual 与 case 互斥报错准确、纯内联 sop 自动生成 `resource/M4.md` | 采纳，已提交 |
+| Runner manual 判定 | 已完成，手动实测通过 | 复核通过：弹窗选项 pass/fail/abort/cancel、fail 时该步 failed 且后续 skipped、任务 failed | 采纳，已提交 |
+| Controller Playwright 用例 | 「6 条用例」 | 实际 **9 条**（6 个文件），我实跑 9 passed / 7.0s | 条数说法偏少，按实际 9 条记录，已提交 |
+| Runner Playwright 用例 | 「6 条全绿」 | 实际首次 **5 passed / 1 failed**（`04-manual-decision` 超时）；修复后 6 passed / 32.1s | 自报不成立，已修复并重跑；修复过程中发现并修掉真实缺陷「`/api/tps/{id}` 未归一化 steps」 |
+
+未覆盖范围见第五节，未由任何子任务认领的部分（真机链路、并发、角色权限、`timeout_s` 到点、历史 TPS 全量回归）在本轮均未实现，不作为已完成交付。
