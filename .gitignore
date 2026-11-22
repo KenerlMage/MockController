@@ -16,3 +16,7 @@ logs/
 controller-web/node_modules/
 controller-web/dist/
 
+
+# ---- pytest 临时目录（工程内，避免系统 Temp 权限问题）----
+.pytest_tmp/
+

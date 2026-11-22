@@ -27,6 +27,20 @@ function encodePath(path) {
     .join('/')
 }
 
+// 常数导入的三条路径：契约里是 /api/v1/constants/*，后端目前只有 /api/constants/*
+// （/import 已支持 zip 与 json），用环境变量可一键切回契约路径
+export const constantsPaths = (version) => {
+  const v1 = import.meta.env.VITE_CONSTANTS_V1 === '1'
+  const q = version ? `?version=${encodeURIComponent(version)}` : ''
+  return {
+    subsystems: v1 ? `/api/v1/constants/subsystems${q}` : `/api/constants/overview${q}`,
+    importZip: v1 ? '/api/v1/constants/import-zip' : '/api/constants/import',
+    importFile: v1 ? '/api/v1/constants/import-file' : '/api/constants/import',
+    // 非契约后端：没有按子系统入参，由前端按子系统过滤合并后一次提交
+    clientSideScope: !v1
+  }
+}
+
 // 文件内容接口返回原始字节，按文本读取；错误仍按 JSON detail 解析
 async function requestText(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, options)
@@ -77,6 +91,10 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ content, encoding: 'utf-8' })
     }),
+  tpsFileDelete: (id, path) =>
+    request(`/api/v1/tps/${encodeURIComponent(id)}/files/${encodePath(path)}`, {
+      method: 'DELETE'
+    }),
 
   tpsParsers: () => request('/api/v1/tps/parsers'),
   tpsContext: (id) => request(`/api/v1/tps/${encodeURIComponent(id)}/context`),
@@ -121,9 +139,18 @@ export const api = {
   metadataDeviceTemplates: () => request('/api/metadata/device-templates'),
 
   constantsVersions: () => request('/api/constants/versions'),
-  // 常数装备树：用于按版本取 PN 下拉候选
+  // 常数装备树（产品 → 子系统 → PN + 模型）：PN 下拉候选、按子系统导入、模型目录共用
   constantsOverview: (version) =>
     request(`/api/constants/overview?version=${encodeURIComponent(version || '')}`),
   constantsModels: (pn, version) =>
-    request(`/api/constants/models?pn=${encodeURIComponent(pn || '')}&version=${encodeURIComponent(version || '')}`)
+    request(`/api/constants/models?pn=${encodeURIComponent(pn || '')}&version=${encodeURIComponent(version || '')}`),
+
+  // 按子系统导入常数：子系统取自常数装备树（/api/constants/overview），
+  // 契约里的 /api/v1/constants/* 后端尚未挂载时退回 /api/constants/import
+  constantsSubsystems: (version) => request(constantsPaths(version).subsystems),
+  // v1 契约：zip 用 import-zip（base64），单文件用 import-file；退回后端现有 /api/constants/import（两者都收 content_base64）
+  constantsImportZip: (payload) =>
+    request(constantsPaths(payload.version).importZip, { method: 'POST', body: JSON.stringify(payload) }),
+  constantsImportFile: (payload) =>
+    request(constantsPaths(payload.version).importFile, { method: 'POST', body: JSON.stringify(payload) })
 }

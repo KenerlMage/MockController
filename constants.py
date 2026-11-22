@@ -494,6 +494,388 @@ def import_from_text(
     return result
 
 
+# ---------------------------------------------------------------- 按子系统导入
+
+# 单次导入的限制：单个文件 / 整包解压体积 / 文件数
+IMPORT_MAX_FILE_BYTES = 20 * 1024 * 1024
+# 包级键：单模型文件归一成模型对象时剔除（否则会混进模型对象被误判）
+PACKAGE_KEYS = ("version", "constant_version", "ver", "label", "source", "note", "description",
+                "groups", "pn_groups", "pnGroups", "models", "constants", "items")
+IMPORT_MAX_ZIP_BYTES = 20 * 1024 * 1024
+IMPORT_MAX_ZIP_FILES = 200
+
+
+def _check_scope(product: str, subsystem: str) -> tuple[str, str]:
+    """调用方指定的 产品/子系统 必须能挂到装备树上（不静默忽略）。"""
+    if not product and not subsystem:
+        return "", ""
+    store = _load_tree_store()
+    if not store:
+        return _text(product, 64), _text(subsystem, 64)
+    products = {_text(p.get("id")) for p in store.get("products") or []}
+    subs = {_text(s.get("id")): s for s in store.get("subsystems") or []}
+    sub_id = _text(subsystem, 64)
+    prod_id = _text(product, 64)
+    if sub_id and sub_id not in subs:
+        raise ValueError(f"装备树中不存在子系统: {sub_id}（可选：{'、'.join(sorted(subs))}）")
+    if prod_id and products and prod_id not in products:
+        raise ValueError(f"装备树中不存在产品: {prod_id}（可选：{'、'.join(sorted(products))}）")
+    if prod_id and sub_id:
+        owners = [str(x) for x in (subs[sub_id].get("products") or [])]
+        if owners and prod_id not in owners:
+            raise ValueError(f"子系统 {sub_id} 不属于产品 {prod_id}（属于：{'、'.join(owners)}）")
+    return prod_id, sub_id
+
+
+def _split_single_model(raw: dict) -> list[dict]:
+    """把「单模型」文件归一成扁平 models 列表，交给 parse_bundle。
+
+    无 version 时给包级版本（再退到 default）；包级 product/subsystem 提到每个模型上。
+    """
+    if raw.get("groups") or raw.get("pn_groups") or raw.get("pnGroups"):
+        return [raw]
+    models_raw = raw.get("models") or raw.get("constants") or raw.get("items")
+    own_pn = raw.get("pn") or raw.get("part_no") or raw.get("part_number")
+    own_key = raw.get("model_key") or _text(raw.get("key") or raw.get("id"), 64)
+    if not isinstance(models_raw, list) or not models_raw:
+        # 单模型：{pn, model_key, fields}（无 version 时用包级 / default）
+        if own_pn and own_key and isinstance(raw.get("fields"), list) and raw["fields"]:
+            models_raw = [{k: v for k, v in raw.items() if k not in PACKAGE_KEYS}]
+        else:
+            raise ValueError("既不是常数包（version+models/groups），也不是单模型（pn+model_key+fields）")
+    flat: list[dict] = []
+    for m in models_raw:
+        if not isinstance(m, dict):
+            raise ValueError("models 数组元素必须是对象")
+        item = dict(m)
+        item["pn"] = item.get("pn") or own_pn
+        item["product"] = item.get("product") or raw.get("product")
+        item["subsystem"] = item.get("subsystem") or raw.get("subsystem")
+        flat.append(item)
+    return [{"version": raw.get("version") or raw.get("constant_version") or raw.get("ver") or "default",
+             "label": raw.get("label"), "source": raw.get("source"), "note": raw.get("note"),
+             "models": flat}]
+
+
+def _merge_inputs(parts: list[tuple[str, bytes]]) -> tuple[dict, list[dict]]:
+    """把多个常数文件合并成一个「可 parse_bundle」的包（纯函数，不落库）。
+
+    parts: [(文件名, 原始字节)]，文件名仅用于错误定位。
+    冲突（同 PN 同 model_key）与版本不一致都抛 ValueError，消息带文件名。
+    """
+    texts: list[tuple[str, Any]] = []
+    errors: list[str] = []
+    for name, raw_bytes in parts:
+        try:
+            if len(raw_bytes) > IMPORT_MAX_FILE_BYTES:
+                raise ValueError(f"文件超过 {IMPORT_MAX_FILE_BYTES // (1024 * 1024)}MB 上限")
+            try:
+                text = raw_bytes.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                raise ValueError("不是 UTF-8 编码")
+            try:
+                raw = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"不是有效 JSON：第 {exc.lineno} 行第 {exc.colno} 列")
+            if isinstance(raw, list):
+                raw = {"models": raw}
+            if not isinstance(raw, dict):
+                raise ValueError("必须是 JSON 对象或数组")
+            texts.append((name, raw))
+        except ValueError as exc:
+            errors.append(f"{name}: {exc}")
+    if errors:
+        raise ValueError("；".join(errors))
+
+    # 版本：首个声明了 version 的文件为准；其余文件要么同版本，要么不声明（随后补该版本）
+    version = ""
+    for name, raw in texts:
+        ver = _text(raw.get("version") or raw.get("constant_version") or raw.get("ver"), 48)
+        if not ver:
+            continue
+        if not version:
+            version = ver
+        elif ver != version:
+            errors.append(f"{name}: 版本号 {ver} 与首个文件的版本 {version} 不一致")
+    if errors:
+        raise ValueError("；".join(errors))
+    version = version or "default"
+
+    merged: dict[str, Any] = {"version": version, "label": "", "source": "", "note": "", "groups": []}
+    by_pn: dict[str, dict] = {}
+    origin: dict[tuple[str, str], str] = {}
+    stats: list[dict] = []
+
+    def merge_one(name: str, bundle: dict) -> None:
+        """把一个已解析的包并入 merged；同 PN 同 model_key 视为冲突。"""
+        for key in ("label", "source", "note"):
+            if bundle.get(key) and not merged.get(key):
+                merged[key] = bundle[key]
+        pn_count = 0
+        model_count = 0
+        for group in bundle["groups"]:
+            slot = by_pn.get(group["pn"])
+            if slot is None:
+                slot = {"pn": group["pn"], "product": group["product"],
+                        "subsystem": group["subsystem"], "models": []}
+                by_pn[group["pn"]] = slot
+                merged["groups"].append(slot)
+            elif group["product"] and not slot["product"]:
+                slot["product"] = group["product"]
+            if group["product"] and group["subsystem"]:
+                slot["subsystem"] = group["subsystem"]
+            pn_count += 1
+            for model in group["models"]:
+                holder = origin.get((group["pn"], model["model_key"]))
+                if holder:
+                    raise ValueError(
+                        f"PN={group['pn']} 的模型 {model['model_key']} 与 {holder} 重复"
+                    )
+                origin[(group["pn"], model["model_key"])] = name
+                slot["models"].append(model)
+                model_count += 1
+        stats.append({"name": name, "version": bundle["version"],
+                      "pn_count": pn_count, "model_count": model_count})
+
+    for name, raw in texts:
+        own_version = _text(raw.get("version") or raw.get("constant_version") or raw.get("ver"), 48)
+        if own_version and own_version != version:
+            errors.append(f"{name}: 版本号 {own_version} 与首个文件的版本 {version} 不一致")
+            continue
+        try:
+            for part in _split_single_model(raw):
+                part.setdefault("version", version)
+                parse_version = _text(part.get("version"), 48)
+                if parse_version != version:
+                    raise ValueError(f"版本号 {parse_version} 与首个文件的版本 {version} 不一致")
+                merge_one(name, parse_bundle(part))
+        except ValueError as exc:
+            errors.append(f"{name}: {exc}")
+    if errors:
+        raise ValueError("；".join(errors))
+    if not merged["groups"]:
+        raise ValueError("文件里没有可导入的常数模型")
+    return merged, stats
+
+
+def build_import_payload(
+    parts: list[tuple[str, bytes]],
+    *,
+    product: str = "",
+    subsystem: str = "",
+    version: str = "",
+) -> tuple[dict, list[dict]]:
+    """合并多个常数文件并在需要时补 product/subsystem、强制版本。只返回包，不落库。"""
+    product, subsystem = _check_scope(product, subsystem)
+    merged, stats = _merge_inputs(parts)
+    if version:
+        merged["version"] = _text(version, 48) or merged["version"]
+    if product or subsystem:
+        for group in merged["groups"]:
+            group["product"] = group["product"] or product
+            group["subsystem"] = group["subsystem"] or subsystem
+    return merged, stats
+
+
+def subsystems_view(version: str = "") -> list[dict]:
+    """按装备树列出子系统，并带上各版本常数库里出现过的 PN。
+
+    version 缺省为生效版本；pns 只取该版本里按 product/subsystem 挂在对应节点下的 PN。
+    """
+    store = _load_tree_store()
+    products = {_text(p.get("id")): _text(p.get("name")) or _text(p.get("id"))
+                for p in store.get("products") or []}
+    subsystems = {_text(s.get("id")): s for s in store.get("subsystems") or []}
+
+    ver = _text(version, 48) or active_version()
+    if ver:
+        names = {v["version"] for v in list_versions()["versions"]}
+        if ver not in names:
+            raise ValueError(f"常数版本不存在: {ver}")
+    by_scope: dict[tuple[str, str], set[str]] = {}
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT product, subsystem, pn FROM constant_model WHERE version = ?",
+            (ver,),
+        ).fetchall()
+    for r in rows:
+        by_scope.setdefault((r["product"] or "", r["subsystem"] or ""), set()).add(r["pn"])
+
+    items: list[dict] = []
+    for sid, sub in subsystems.items():
+        owners = [str(x) for x in (sub.get("products") or [])] or [""]
+        for pid in owners:
+            pns: set[str] = set(by_scope.get((pid, sid), set()))
+            if not pid:
+                pns |= set(by_scope.get((UNCLASSIFIED, sid), set()))
+            items.append(
+                {
+                    "product": pid,
+                    "product_name": products.get(pid, "") or pid,
+                    "subsystem": sid,
+                    "subsystem_name": _text(sub.get("name")) or sid,
+                    "pns": sorted(pns),
+                }
+            )
+    items.sort(key=lambda x: (x["product"], x["subsystem"]))
+    return items
+
+
+def import_files(
+    parts: list[tuple[str, bytes]],
+    *,
+    product: str = "",
+    subsystem: str = "",
+    version: str = "",
+    mode: str = "overwrite",
+    operator: str = "",
+    keep_values: bool = True,
+) -> dict:
+    """多个常数文件 → 合并成一个 bundle → 一次性落库（全成功或全不动）。
+
+    落库前完成全部解析与合并，任何文件出错抛 ImportError 风格的 ValueError（未写入任何数据）。
+    """
+    if not parts:
+        raise ValueError("没有可导入的文件（需要至少一个 .json）")
+    if mode not in ("overwrite", "reject"):
+        raise ValueError("mode 只能是 overwrite 或 reject")
+    merged, stats = build_import_payload(parts, product=product, subsystem=subsystem, version=version)
+    bundle = parse_bundle(merged)
+    result = import_bundle(bundle, mode=mode, operator=operator, keep_values=keep_values)
+    if not result.get("success"):
+        # reject 与版本已存在：一个字节也没写
+        return {
+            **result,
+            "imported_files": [],
+            "warnings": [result.get("message", "")],
+        }
+    imported_files = []
+    for item in stats:
+        group_pns = {g["pn"] for g in bundle["groups"]}
+        imported_files.append(
+            {
+                "name": item["name"],
+                "pn_count": item["pn_count"],
+                "model_count": item["model_count"],
+                "version": item["version"],
+                "pns": sorted(group_pns),
+            }
+        )
+    return {
+        **result,
+        "stats": {**bundle["stats"],
+                  "value_count": sum(len(m.get("values") or {}) for g in bundle["groups"]
+                                     for m in g["models"])},
+        "imported_files": imported_files,
+        "warnings": [],
+    }
+
+
+def import_zip_files(
+    raw: bytes,
+    *,
+    product: str = "",
+    subsystem: str = "",
+    version: str = "",
+    mode: str = "overwrite",
+    operator: str = "",
+    keep_values: bool = True,
+) -> dict:
+    """ZIP → 只处理 .json（允许一层子目录）→ 逐文件解析合并 → 一次落库。
+
+    返回带 zip_files（逐文件 ok/error），便于前端展示；任一失败整体不落库。
+    """
+    if len(raw) > IMPORT_MAX_ZIP_BYTES:
+        raise ValueError(f"压缩包超过 {IMPORT_MAX_ZIP_BYTES // (1024 * 1024)}MB 上限")
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile:
+        raise ValueError("压缩包不是有效的 ZIP 文件")
+
+    entries = []
+    skipped: list[dict] = []
+    for info in zf.infolist():
+        name = info.filename.replace("\\", "/")
+        if info.is_dir() or name.startswith("__MACOSX"):
+            continue
+        parts = name.split("/")
+        if len(parts) > 2 or ".." in parts or name.startswith("/") or ":" in parts[0]:
+            raise ValueError(f"压缩包内路径越界：{name}")
+        if not name.lower().endswith(".json"):
+            skipped.append({"name": name, "size": info.file_size, "ok": False,
+                            "error": "仅处理 .json 文件", "skipped": True})
+            continue
+        entries.append((name, info, zf))
+    if not entries:
+        raise ValueError("压缩包内没有 JSON 文件")
+
+    results: dict[str, dict] = {}
+    payload: list[tuple[str, bytes]] = []
+    file_errors: list[str] = []
+    total = 0
+    for name, info, _ in entries:
+        if len(payload) >= IMPORT_MAX_ZIP_FILES:
+            raise ValueError(f"压缩包内 JSON 文件超过 {IMPORT_MAX_ZIP_FILES} 个上限")
+        size = info.file_size
+        total += size
+        if total > IMPORT_MAX_ZIP_BYTES:
+            raise ValueError(f"压缩包解压后体积超过 {IMPORT_MAX_ZIP_BYTES // (1024 * 1024)}MB 上限")
+        try:
+            data = zf.read(info)
+        except Exception as exc:  # noqa: BLE001 - 损坏条目单独记错误
+            results[name] = {"name": name, "size": size, "ok": False, "error": f"读取失败: {exc}"}
+            file_errors.append(f"{name}: 读取失败: {exc}")
+            continue
+        if len(data) > IMPORT_MAX_FILE_BYTES:
+            msg = f"文件超过 {IMPORT_MAX_FILE_BYTES // (1024 * 1024)}MB 上限"
+            results[name] = {"name": name, "size": len(data), "ok": False, "error": msg}
+            file_errors.append(f"{name}: {msg}")
+            continue
+        results[name] = {"name": name, "size": len(data), "ok": True, "error": ""}
+        payload.append((name, data))
+
+    if file_errors:
+        raise ValueError("；".join(file_errors))
+
+    merged, stats = build_import_payload(payload, product=product, subsystem=subsystem,
+                                         version=version)
+    failed = False
+    for item in stats:
+        results[item["name"]].update(
+            {"ok": item["model_count"] > 0,
+             "error": "" if item["model_count"] else "文件内没有可用模型",
+             "pn_count": item["pn_count"], "model_count": item["model_count"]}
+        )
+        failed = failed or item["model_count"] <= 0
+    if failed:
+        raise ValueError("；".join(f"{n}: {r['error']}" for n, r in results.items()
+                                   if not r["ok"] and not r.get("skipped")))
+
+    bundle = parse_bundle(merged)
+    result = import_bundle(bundle, mode=mode, operator=operator, keep_values=keep_values)
+    zip_files = [results[name] for name, _ in payload] + skipped
+    if not result.get("success"):
+        for row in zip_files:
+            row["ok"] = False
+            row["error"] = row.get("error") or result.get("message", "")
+        return {**result, "imported_files": [], "zip_files": zip_files,
+                "warnings": [result.get("message", "")]}
+    imported_files = [
+        {"name": item["name"], "pn_count": item["pn_count"], "model_count": item["model_count"]}
+        for item in stats
+    ]
+    warnings = [f"已跳过非 JSON 文件：{s['name']}" for s in skipped]
+    return {
+        **result,
+        "stats": {**bundle["stats"],
+                  "value_count": sum(len(m.get("values") or {}) for g in bundle["groups"]
+                                     for m in g["models"])},
+        "imported_files": imported_files,
+        "zip_files": zip_files,
+        "warnings": warnings,
+    }
+
+
 # ---------------------------------------------------------------- 查询
 
 

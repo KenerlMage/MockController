@@ -69,14 +69,68 @@ def ensure_root() -> None:
     TPS_ROOT.mkdir(parents=True, exist_ok=True)
 
 
+def constant_bindings(raw: dict) -> list[dict]:
+    """清单的常数多行绑定（只读，不写回）。
+
+    兼容旧字段：清单无 `constant_bindings` 时由 `constant_model` 派生为单元素列表。
+    """
+    bindings = raw.get("constant_bindings") if isinstance(raw, dict) else None
+    if isinstance(bindings, list) and bindings:
+        return [b for b in bindings if isinstance(b, dict)]
+    legacy = raw.get("constant_model") if isinstance(raw, dict) else None
+    if isinstance(legacy, dict) and legacy:
+        return [legacy]
+    return []
+
+
+def _norm_binding(raw: Any) -> dict:
+    """单行绑定规范化：version/pn 取字符串，models 去空、去重且保留顺序。"""
+    raw = raw if isinstance(raw, dict) else {}
+    models = [str(m).strip() for m in (raw.get("models") or []) if str(m).strip()]
+    return {
+        "version": str(raw.get("version") or "").strip(),
+        "pn": str(raw.get("pn") or "").strip(),
+        "models": list(dict.fromkeys(models)),
+    }
+
+
+def normalize_constants(raw: dict) -> list[dict]:
+    """把清单里的常数绑定规范成多行，并同步写回两个字段（就地修改 raw）。
+
+    - 含 `constant_bindings` 列表：以它为准，逐行补 version/pn/models；
+    - 只有旧字段 `constant_model`：派生为单元素列表；
+    - 两者都有：以 constant_bindings 为准，`constant_model` 同步为第一行（Runner 旧读法仍可用）。
+    返回规范化后的绑定列表。
+    """
+    if not isinstance(raw, dict):
+        return []
+    source = raw.get("constant_bindings")
+    if isinstance(source, list):
+        bindings = [_norm_binding(b) for b in source if isinstance(b, dict)]
+        bindings = [b for b in bindings if b["version"] or b["pn"] or b["models"]]
+    else:
+        legacy = raw.get("constant_model")
+        bindings = [_norm_binding(legacy)] if isinstance(legacy, dict) and legacy else []
+
+    if not bindings:
+        raw.pop("constant_bindings", None)
+        raw.pop("constant_model", None)
+        return []
+
+    raw["constant_bindings"] = bindings
+    raw["constant_model"] = dict(bindings[0])
+    return bindings
+
+
 def _summary(raw: dict) -> dict:
-    constant = raw.get("constant_model") or {}
-    models = constant.get("models") or []
+    bindings = constant_bindings(raw)
+    model_count = sum(len(b.get("models") or []) for b in bindings)
     deploy = raw.get("deploy") or []
     parser = raw.get("parser") or {}
     parser_name = parser.get("name") if isinstance(parser, dict) else str(parser or "")
     process = raw.get("process") or {}
     device_config = raw.get("device_config") or {}
+    legacy = raw.get("constant_model") if isinstance(raw.get("constant_model"), dict) else {}
     return {
         "id": raw.get("id", ""),
         "name": raw.get("name", ""),
@@ -94,8 +148,12 @@ def _summary(raw: dict) -> dict:
         "description": raw.get("description", ""),
         "cmd_suit_count": len(raw.get("cmd_suit") or []),
         "step_count": len(raw.get("steps") or []),
-        "has_constants": bool(models),
-        "constant_model_count": len(models),
+        "has_constants": bool(model_count),
+        "constant_binding_count": len(bindings),
+        # 所有行 models 合计（单行清单的结果与旧字段长度一致）
+        "constant_model_count": model_count,
+        "constant_model_pn": legacy.get("pn", ""),
+        "constant_model_version": legacy.get("version", ""),
         "deploy_count": len(deploy) if isinstance(deploy, list) else 0,
         "updated_at": raw.get("updated_at", ""),
     }
@@ -232,6 +290,7 @@ def save(raw: dict, overwrite: bool = True) -> dict:
     target.mkdir(parents=True, exist_ok=True)
 
     payload = dict(raw)
+    normalize_constants(payload)
     payload["updated_at"] = _now()
     (target / "tps.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"

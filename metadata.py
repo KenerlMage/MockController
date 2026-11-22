@@ -744,13 +744,20 @@ class BomItemRequest(BaseModel):
 def register_routes(app: FastAPI, base_dir: Path, tps_dir: Path) -> None:
     global _BASE_DIR, _TPS_DIR, _TREE_DIR, _TREE_FILE, _BOM_DIR, _SEED_FILE, _REGISTRY_FILE
 
-    _BASE_DIR = Path(base_dir)
-    _TPS_DIR = Path(tps_dir)
-    _TREE_DIR = Path(os.environ.get("ATE_TREE_DIR") or (_BASE_DIR / "tree"))
+    # 一律转绝对路径：app.py 传入的是相对 base_dir 时，进程换目录就会读错树
+    app_dir = Path(__file__).resolve().parent
+    _BASE_DIR = Path(base_dir).resolve() if Path(base_dir).is_absolute() else (app_dir / base_dir).resolve()
+    _TPS_DIR = Path(tps_dir).resolve() if Path(tps_dir).is_absolute() else (app_dir / tps_dir).resolve()
+    _TREE_DIR = Path(os.environ.get("ATE_TREE_DIR") or (_BASE_DIR / "tree")).resolve()
     _TREE_FILE = _TREE_DIR / "tree.json"
     _BOM_DIR = _TREE_DIR / "bom"
     _SEED_FILE = _TPS_DIR / "testbench_presets.json"
     _REGISTRY_FILE = _TPS_DIR / "testbenches.json"
+    # 种子文件不在数据根下时，回退到工程自带的 testresource
+    if not _SEED_FILE.is_file():
+        fallback = app_dir / "testresource" / "testbench_presets.json"
+        if fallback.is_file():
+            _SEED_FILE = fallback
 
     # 启动即确保数据目录存在 (首次运行自动把既有预设纳入管理)
     try:

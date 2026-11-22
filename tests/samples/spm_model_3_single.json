@@ -1,0 +1,1 @@
+{"pn": "PN-TEST-B1C", "model_key": "M3", "name": "测试模型 M3", "fields": [{"key": "k3", "label": "常数 k3", "type": "float", "unit": "Ω", "default": 100.0}]}

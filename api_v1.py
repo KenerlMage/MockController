@@ -5,6 +5,8 @@ Runner 只读这些接口；Web 端执行写操作。
 
 from __future__ import annotations
 
+import base64
+
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -12,6 +14,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 import assistants
+import constants
 import constants_export
 import processes
 import tps_scaffold
@@ -56,12 +59,47 @@ class ScaffoldRequest(BaseModel):
     process_id: str = ""
     id: str = ""
     name: str = ""
+    # 多行绑定优先；constant_version/pn/models 为旧的单行写法，兼容保留
+    bindings: list[dict[str, Any]] = []
     constant_version: str = ""
     pn: str = ""
     models: list[str] = []
     device_aliases: list[str] = []
     parser: str = tps_scaffold.DEFAULT_PARSER
     save: bool = False
+
+
+class ConstantFile(BaseModel):
+    name: str = ""
+    content_base64: str = ""
+
+
+class ConstantsBundleImport(BaseModel):
+    subsystem: str = ""
+    product: str = ""
+    mode: str = "overwrite"
+    version: str = ""
+    files: list[ConstantFile] = []
+    filename: str = ""
+
+
+class ConstantsZipImport(BaseModel):
+    subsystem: str = ""
+    product: str = ""
+    mode: str = "overwrite"
+    version: str = ""
+    filename: str = ""
+    content_base64: str = ""
+
+
+class ConstantsFileImport(BaseModel):
+    subsystem: str = ""
+    product: str = ""
+    mode: str = "overwrite"
+    version: str = ""
+    filename: str = ""
+    content: str = ""
+    content_base64: str = ""
 
 
 @router.get("/health")
@@ -149,6 +187,7 @@ def tps_scaffold_create(req: ScaffoldRequest) -> dict:
             constant_version=req.constant_version,
             pn=req.pn,
             models=req.models,
+            bindings=req.bindings,
             device_aliases=req.device_aliases,
             parser=req.parser,
             save=req.save,
@@ -208,6 +247,150 @@ def import_tps_zip(req: TpsZipImport) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     warnings = summary.pop("warnings", [])
     return {"ok": True, "tps": summary, "warnings": warnings, "message": f"TPS 导入成功: {summary['id']}"}
+
+
+# ---------------------------------------------------------------- 常数按子系统导入
+
+
+def _decode_files(files: list[ConstantFile]) -> list[tuple[str, bytes]]:
+    """把 [{name, content_base64}] 解成 [(文件名, 字节)]；解码失败直接 400。"""
+    parts: list[tuple[str, bytes]] = []
+    errors: list[str] = []
+    for index, item in enumerate(files or []):
+        name = str(item.name or "").strip() or f"文件{index + 1}.json"
+        if not str(item.content_base64 or "").strip():
+            errors.append(f"{name}: 缺少 content_base64")
+            continue
+        try:
+            parts.append((name, base64.b64decode(item.content_base64, validate=True)))
+        except Exception as exc:  # noqa: BLE001 - 非法 base64
+            errors.append(f"{name}: base64 解码失败（{exc}）")
+    if errors:
+        raise HTTPException(status_code=400, detail="；".join(errors))
+    return parts
+
+
+@router.get("/constants/subsystems")
+def constants_subsystems(version: str = "") -> dict:
+    """装备树里的全部子系统（各自带上常数库中出现的 PN）。"""
+    try:
+        items = constants.subsystems_view(version)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "items": items}
+
+
+@router.post("/constants/import-bundle")
+def constants_import_bundle(req: ConstantsBundleImport) -> dict:
+    """多文件常数模型 → 合并为一个 bundle → 一次落库（全成功或全不动）。"""
+    parts = _decode_files(req.files)
+    if not parts:
+        raise HTTPException(status_code=400, detail="files 不能为空")
+    try:
+        result = constants.import_files(
+            parts,
+            product=req.product,
+            subsystem=req.subsystem,
+            version=req.version,
+            mode=req.mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result.get("success"):
+        return {"ok": False, "version": result.get("version", ""), **result,
+                "filename": req.filename}
+    return {
+        "ok": True,
+        "version": result["version"],
+        "stats": result["stats"],
+        "imported_files": result["imported_files"],
+        "warnings": result.get("warnings") or [],
+        "success": True,
+        "overwritten": result.get("overwritten", False),
+        "imported_values": result.get("imported_values", 0),
+        "restored_values": result.get("restored_values", 0),
+        "message": result.get("message", ""),
+    }
+
+
+@router.post("/constants/import-zip")
+def constants_import_zip(req: ConstantsZipImport) -> dict:
+    """ZIP（20MB / 200 个 JSON 文件上限）→ 逐文件解析合并 → 一次落库。"""
+    raw_text = str(req.content_base64 or "").strip()
+    if not raw_text:
+        raise HTTPException(status_code=400, detail="缺少 content_base64")
+    try:
+        blob = base64.b64decode(raw_text, validate=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"content_base64 解码失败（{exc}）") from exc
+    if len(blob) > constants.IMPORT_MAX_ZIP_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"压缩包超过 {constants.IMPORT_MAX_ZIP_BYTES // (1024 * 1024)}MB 上限"
+                   f"（实际 {len(blob)} 字节）",
+        )
+    try:
+        result = constants.import_zip_files(
+            blob,
+            product=req.product,
+            subsystem=req.subsystem,
+            version=req.version,
+            mode=req.mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result.get("success"):
+        return {"ok": False, "version": result.get("version", ""), **result,
+                "filename": req.filename}
+    return {
+        "ok": True,
+        "version": result["version"],
+        "stats": result["stats"],
+        "imported_files": result["imported_files"],
+        "zip_files": result["zip_files"],
+        "warnings": result.get("warnings") or [],
+        "success": True,
+        "overwritten": result.get("overwritten", False),
+        "imported_values": result.get("imported_values", 0),
+        "restored_values": result.get("restored_values", 0),
+        "message": result.get("message", ""),
+    }
+
+
+@router.post("/constants/import-file")
+def constants_import_file(req: ConstantsFileImport) -> dict:
+    """单个常数模型文件（无需 zip）。content_base64 优先，其次 content。"""
+    name = str(req.filename or "").strip() or "constants.json"
+    if str(req.content_base64 or "").strip():
+        parts = _decode_files([ConstantFile(name=name, content_base64=req.content_base64)])
+    elif isinstance(req.content, str) and req.content.strip():
+        parts = [(name, req.content.encode("utf-8"))]
+    else:
+        raise HTTPException(status_code=400, detail="缺少 content 或 content_base64")
+    try:
+        result = constants.import_files(
+            parts,
+            product=req.product,
+            subsystem=req.subsystem,
+            version=req.version,
+            mode=req.mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result.get("success"):
+        return {"ok": False, "version": result.get("version", ""), **result, "filename": name}
+    return {
+        "ok": True,
+        "version": result["version"],
+        "stats": result["stats"],
+        "imported_files": result["imported_files"],
+        "warnings": result.get("warnings") or [],
+        "success": True,
+        "overwritten": result.get("overwritten", False),
+        "imported_values": result.get("imported_values", 0),
+        "restored_values": result.get("restored_values", 0),
+        "message": result.get("message", ""),
+    }
 
 
 @router.get("/tps/{tps_id}/files")

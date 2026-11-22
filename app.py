@@ -25,11 +25,9 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 _HERE = Path(__file__).resolve().parent
-REPO_ROOT = Path(
-    os.environ.get("MOCK_CONTROLLER_REPO")
-    or os.environ.get("ATE_CONTROLLER_REPO")
-    or (_HERE / "repo")
-).resolve()
+_REPO_ENV = os.environ.get("MOCK_CONTROLLER_REPO") or os.environ.get("ATE_CONTROLLER_REPO") or ""
+# 相对路径一律相对工程目录解析：进程工作目录不同也不会读错数据根
+REPO_ROOT = (Path(_REPO_ENV).resolve() if Path(_REPO_ENV).is_absolute() else (_HERE / _REPO_ENV).resolve()) if _REPO_ENV else (_HERE / "repo")
 HOST = os.environ.get("MOCK_CONTROLLER_HOST") or os.environ.get("ATE_CONTROLLER_HOST") or "0.0.0.0"
 PORT = int(os.environ.get("MOCK_CONTROLLER_PORT") or os.environ.get("ATE_CONTROLLER_PORT") or "8070")
 

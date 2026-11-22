@@ -1,0 +1,1 @@
+{"version": "VER-TEST-B1", "groups": [{"product": "1000-A", "subsystem": "SPM", "pn": "PN-TEST-B1B", "models": [{"model_key": "M2", "name": "测试模型 M2", "fields": [{"key": "k2", "label": "常数 k2", "type": "float", "unit": "A", "default": 0.5}]}]}]}

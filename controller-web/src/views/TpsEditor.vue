@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../api.js'
+import CodeWorkspace from '../components/CodeWorkspace.vue'
 
 const props = defineProps({
   tps: { type: Object, required: true },
@@ -22,30 +23,27 @@ const ctxError = ref('')
 const parserName = ref(((props.tps.parser || {}).name) || props.tps.schema || '')
 const processId = ref(((props.tps.process || {}).id) || '')
 
-// ---------------- 机器常数 ----------------
+// ---------------- 机器常数（多行） ----------------
+// 每行 = {version, pn, models: []}；保存写 constant_bindings，同时把第一行同步到 constant_model 兼容旧 Runner
 const fallbackVersions = ref([])
 const parserMeta = ref([])
-const models = ref([])
-const constantVersion = ref((props.tps.constant_model || {}).version || '')
-const constantPn = ref((props.tps.constant_model || {}).pn || '')
+const catalog = ref([]) // 归一化后 [{version, pn, models:[{model_key,name}]}]
+const rowPns = ref({}) // rowIndex -> 该版本 PN 列表
+const rowModels = ref({}) // rowIndex -> 该 PN 模型列表
+const bindings = ref([{ version: '', pn: '', models: [] }])
 
 // ---------------- 用例代码 ----------------
-const fileList = ref(props.files || [])
-const currentFile = ref('')
-const code = ref('')
-const codeDirty = ref(false)
-const loadingFile = ref(false)
-const savingFile = ref(false)
-const fileNotice = ref('')
-const fileError = ref('')
-const newFilePath = ref(null)
-const pendingFile = ref('')
-const gutter = ref(null)
-
-const codeFiles = computed(() => fileList.value.filter((f) => /\.(py|md)$/i.test(f)))
-const lineCount = computed(() => code.value.split('\n').length)
-
+// 文件树、编辑与保存全部交给 CodeWorkspace，本页不再持有代码状态
 const deployItems = computed(() => draft.value.deploy || [])
+
+// 顶部信息条：常数绑定汇总
+const bindingSummary = computed(() => {
+  const rows = bindings.value.filter((b) => b.version && b.pn)
+  if (!rows.length) return '—'
+  return rows
+    .map((b) => `${b.version}/${b.pn}${b.models.length ? `×${b.models.length}` : ''}`)
+    .join('；')
+})
 
 const parserOptions = computed(() => {
   const listed = (context.value && context.value.parsers) || []
@@ -87,10 +85,18 @@ const extraAliases = computed(() => {
 
 const versionList = computed(() => {
   const fromCtx = (context.value && context.value.constants && context.value.constants.versions) || []
-  const list = fromCtx.length ? fromCtx : fallbackVersions.value
+  const raw = fromCtx.length ? fromCtx : fallbackVersions.value
+  const list = []
+  const known = new Set()
+  const push = (version, stale) => {
+    if (!version || known.has(version)) return
+    known.add(version)
+    list.push({ version, stale })
+  }
+  for (const v of raw) push(typeof v === 'string' ? v : v && v.version, false)
+  // 绑定里引用了但版本表已不存在的版本也列出来，避免下拉空白
+  for (const b of bindings.value) push(b.version, true)
   return list
-    .map((v) => (typeof v === 'string' ? { version: v } : v))
-    .filter((v) => v && v.version)
 })
 
 const presetInfo = computed(() => (context.value && context.value.preset) || null)
@@ -131,17 +137,29 @@ function applyStructured() {
   if (proc) base.process = { id: proc.id, code: proc.code, name: proc.name }
   else if (draft.value.process) base.process = draft.value.process
   else delete base.process
-  if (constantVersion.value) {
-    base.constant_model = {
-      version: constantVersion.value,
-      pn: constantPn.value,
-      models: (draft.value.constant_model || {}).models || []
-    }
-  } else {
-    delete base.constant_model
-  }
+  const rows = cleanedBindings()
+  if (rows.length) base.constant_bindings = rows
+  else delete base.constant_bindings
+  if (rows.length) base.constant_model = { ...rows[0], models: [...rows[0].models] }
+  else delete base.constant_model
   draft.value = JSON.parse(JSON.stringify(base))
   rawJson.value = JSON.stringify(base, null, 2)
+}
+
+// 保存用的绑定列表：丢掉未选版本的半成品行，去重
+function cleanedBindings() {
+  const out = []
+  const seen = new Set()
+  for (const b of bindings.value) {
+    const version = (b.version || '').trim()
+    const pn = (b.pn || '').trim()
+    if (!version) continue
+    const key = `${version}|${pn}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ version, pn, models: [...(b.models || [])] })
+  }
+  return out
 }
 
 // ---------------- 解析器 / 工序 ----------------
@@ -177,7 +195,7 @@ function removeExtraAlias(alias) {
   applyStructured()
 }
 
-// ---------------- 机器常数 ----------------
+// ---------------- 机器常数（多行） ----------------
 async function loadParserMeta() {
   // context.parsers 不含 runtime，补一次 /tps/parsers 才能写出正确的 parser.version（v1=1.0）
   try {
@@ -197,44 +215,127 @@ async function loadFallbackVersions() {
   }
 }
 
-async function refreshModels() {
-  if (!constantVersion.value) {
-    models.value = []
-    return
+// 归一化 context.constants.catalog，两种形态都能用：
+//   扁平（契约）[{version, pn, models:[{model_key}]}]
+//   嵌套（后端实际返回）[{version, pns:[{pn, models:[{model_key, name}]}]}]
+function normCatalog(raw) {
+  const out = []
+  for (const item of raw || []) {
+    if (!item) continue
+    const version = item.version || ''
+    if (Array.isArray(item.pns)) {
+      for (const node of item.pns) {
+        if (!node || !node.pn) continue
+        out.push({ version, pn: node.pn, models: normModels(node.models) })
+      }
+    } else if (Array.isArray(item.models)) {
+      out.push({ version, pn: item.pn || '', models: normModels(item.models) })
+    }
   }
+  return out
+}
+
+// catalog.models 可能是对象数组，也可能是 model_key 字符串数组
+function normModels(list) {
+  return (list || [])
+    .map((m) => (typeof m === 'string' ? { model_key: m, name: m } : m))
+    .filter((m) => m && (m.model_key || m.key))
+}
+
+const catalogFor = (version) => catalog.value.filter((c) => !c.version || c.version === version)
+
+function pnsFor(version) {
+  const pns = new Set()
+  for (const c of catalogFor(version)) if (c.pn) pns.add(c.pn)
+  return [...pns].sort()
+}
+
+function modelsFor(version, pn) {
+  const hit = catalogFor(version).find((c) => c.pn === pn)
+  return hit ? hit.models || [] : []
+}
+
+// 行下拉候选：先用行级缓存（接口补齐的），再回退 catalog
+function rowPnOptions(index) {
+  const row = bindings.value[index]
+  const cached = rowPns.value[index]
+  if (cached && cached.version === row.version) return cached.list
+  return pnsFor(row.version)
+}
+
+function rowModelOptions(index) {
+  const row = bindings.value[index]
+  const cached = rowModels.value[index]
+  if (cached && cached.version === row.version && cached.pn === row.pn) return cached.list
+  return modelsFor(row.version, row.pn)
+}
+
+// catalog 缺数据时向接口补齐（单行失败不影响其他行）
+async function fetchPns(index) {
+  const row = bindings.value[index]
+  if (!row || !row.version || pnsFor(row.version).length) return
   try {
-    const data = await api.constantsModels(constantPn.value, constantVersion.value)
-    models.value = data.models || []
+    const data = await api.constantsOverview(row.version)
+    const list = []
+    for (const prod of data.tree || []) {
+      for (const sub of prod.subsystems || []) {
+        for (const pnNode of sub.pns || []) if (pnNode && pnNode.pn) list.push(pnNode.pn)
+      }
+    }
+    rowPns.value = { ...rowPns.value, [index]: { version: row.version, list: [...new Set(list)].sort() } }
   } catch {
-    const ctxModels = ((context.value && context.value.constants) || {}).models || []
-    models.value = ctxModels
+    // 接口不可用：保留手填
   }
 }
 
-function syncConstantModel() {
-  if (!constantVersion.value) {
-    delete draft.value.constant_model
-    applyStructured()
-    models.value = []
-    return
+async function fetchModels(index) {
+  const row = bindings.value[index]
+  if (!row || !row.version || !row.pn || modelsFor(row.version, row.pn).length) return
+  try {
+    const data = await api.constantsModels(row.pn, row.version)
+    rowModels.value = {
+      ...rowModels.value,
+      [index]: { version: row.version, pn: row.pn, list: normModels(data.models) }
+    }
+  } catch {
+    // 同上
   }
-  const existing = draft.value.constant_model || {}
-  draft.value.constant_model = {
-    version: constantVersion.value,
-    pn: constantPn.value,
-    models: existing.models || []
-  }
-  applyStructured()
-  refreshModels()
 }
 
-function toggleModel(key) {
-  const cur = draft.value.constant_model || { models: [] }
-  const list = new Set(cur.models || [])
-  if (list.has(key)) list.delete(key)
-  else list.add(key)
-  draft.value.constant_model = { ...cur, models: [...list] }
-  applyStructured()
+async function prepareRow(index) {
+  await fetchPns(index)
+  await fetchModels(index)
+}
+
+function addBinding() {
+  // 新行默认沿用上一行的版本，减少重复选择
+  const last = bindings.value[bindings.value.length - 1]
+  bindings.value.push({ version: (last && last.version) || '', pn: '', models: [] })
+}
+
+function removeBinding(index) {
+  bindings.value.splice(index, 1)
+}
+
+async function onBindingVersion(index) {
+  const row = bindings.value[index]
+  row.pn = ''
+  row.models = []
+  await prepareRow(index)
+}
+
+async function onBindingPn(index) {
+  const row = bindings.value[index]
+  row.models = []
+  await fetchModels(index)
+}
+
+function toggleBindingModel(index, key) {
+  const row = bindings.value[index]
+  const set = new Set(row.models || [])
+  if (set.has(key)) set.delete(key)
+  else set.add(key)
+  row.models = [...set]
 }
 
 // ---------------- 上下文加载 ----------------
@@ -244,123 +345,17 @@ async function loadContext(id) {
     const data = await api.tpsContext(id)
     if (data && data.ok === false) throw new Error(data.message || '返回失败')
     context.value = data || null
+    catalog.value = normCatalog(((data && data.constants) || {}).catalog)
+    await Promise.all(bindings.value.map((_, i) => prepareRow(i)))
   } catch (e) {
     context.value = null
     ctxError.value = `上下文接口未就绪（GET /api/v1/tps/${id}/context）：${e.message}；基础字段与清单原文仍可编辑`
-    return
   }
-}
-
-async function refreshContextConstants() {
-  if (!constantVersion.value) return
-  await refreshModels()
 }
 
 // ---------------- 用例代码 ----------------
-async function refreshFiles() {
-  try {
-    const data = await api.tpsFiles(props.tps.id)
-    fileList.value = data.files || []
-  } catch (e) {
-    fileError.value = `文件列表接口未就绪（GET /api/v1/tps/{id}/files）：${e.message}`
-  }
-}
-
-function pickFile(path) {
-  if (path === currentFile.value) return
-  if (codeDirty.value) {
-    pendingFile.value = path
-    return
-  }
-  loadFile(path)
-}
-
-async function loadFile(path) {
-  fileNotice.value = ''
-  fileError.value = ''
-  loadingFile.value = true
-  try {
-    const text = await api.tpsFileContent(props.tps.id, path)
-    currentFile.value = path
-    code.value = text
-    codeDirty.value = false
-    pendingFile.value = ''
-  } catch (e) {
-    fileError.value = `读取 ${path} 失败：${e.message}`
-  } finally {
-    loadingFile.value = false
-  }
-}
-
-function discardAndSwitch() {
-  const path = pendingFile.value
-  pendingFile.value = ''
-  codeDirty.value = false
-  loadFile(path)
-}
-
-function syncScroll(event) {
-  if (gutter.value) gutter.value.scrollTop = event.target.scrollTop
-}
-
-function insertTab(event) {
-  const el = event.target
-  el.setRangeText('    ', el.selectionStart, el.selectionEnd, 'end')
-  code.value = el.value
-  codeDirty.value = true
-}
-
-async function saveFile() {
-  if (!currentFile.value) return
-  fileError.value = ''
-  fileNotice.value = ''
-  savingFile.value = true
-  try {
-    const res = await api.tpsFileSave(props.tps.id, currentFile.value, code.value)
-    codeDirty.value = false
-    fileNotice.value = `已保存 ${(res && res.path) || currentFile.value}（${(res && res.size) ?? code.value.length} 字节）`
-    await refreshFiles()
-  } catch (e) {
-    fileError.value = `保存 ${currentFile.value} 失败：${e.message}`
-  } finally {
-    savingFile.value = false
-  }
-}
-
-function startNewFile() {
-  newFilePath.value = 'testcase/new_case.py'
-  fileError.value = ''
-}
-
-async function createFile() {
-  fileError.value = ''
-  fileNotice.value = ''
-  const path = (newFilePath.value || '').trim()
-  if (!path) {
-    fileError.value = '请填写文件路径'
-    return
-  }
-  if (path.startsWith('/') || path.includes('..')) {
-    fileError.value = '路径不能以 / 开头或包含 ..'
-    return
-  }
-  if (!/\.(py|md)$/i.test(path)) {
-    fileError.value = '只支持 .py / .md 文件'
-    return
-  }
-  if (fileList.value.includes(path)) {
-    fileError.value = `文件已存在：${path}`
-    return
-  }
-  try {
-    await api.tpsFileSave(props.tps.id, path, `# -*- coding: utf-8 -*-\n# ${path}\n`)
-    newFilePath.value = null
-    await refreshFiles()
-    await loadFile(path)
-    fileNotice.value = `已创建 ${path}`
-  } catch (e) {
-    fileError.value = `创建 ${path} 失败：${e.message}`
-  }
+function onCodeSaved() {
+  // 文件级保存提示在 CodeWorkspace 内部展示，这里无需再报
 }
 
 // ---------------- 部署条目 ----------------
@@ -399,13 +394,13 @@ function save() {
   if (proc) payload.process = { id: proc.id, code: proc.code, name: proc.name }
   else if (draft.value.process) payload.process = draft.value.process
   else delete payload.process
-  if (constantVersion.value) {
-    payload.constant_model = {
-      version: constantVersion.value,
-      pn: constantPn.value,
-      models: (draft.value.constant_model || {}).models || []
-    }
+  // 多行绑定写 constant_bindings；第一行同步 constant_model 兼容旧 Runner
+  const rows = cleanedBindings()
+  if (rows.length) {
+    payload.constant_bindings = rows
+    payload.constant_model = { ...rows[0], models: [...rows[0].models] }
   } else {
+    delete payload.constant_bindings
     delete payload.constant_model
   }
   delete payload.steps
@@ -414,24 +409,29 @@ function save() {
 }
 
 // ---------------- 切换 TPS 时重置 ----------------
+function initialBindings(val) {
+  const rows = Array.isArray(val.constant_bindings) ? val.constant_bindings : []
+  const list = rows
+    .filter((b) => b && typeof b === 'object')
+    .map((b) => ({ version: b.version || '', pn: b.pn || '', models: [...(b.models || [])] }))
+  if (list.length) return list
+  const cm = val.constant_model || {}
+  // 旧格式只有一行 constant_model；无任何绑定时保留一行空行给用户选
+  return [{ version: cm.version || '', pn: cm.pn || '', models: [...(cm.models || [])] }]
+}
+
 function applyTps(val) {
   draft.value = JSON.parse(JSON.stringify(val))
   rawJson.value = JSON.stringify(val, null, 2)
-  constantVersion.value = (val.constant_model || {}).version || ''
-  constantPn.value = (val.constant_model || {}).pn || ''
+  bindings.value = initialBindings(val)
+  rowPns.value = {}
+  rowModels.value = {}
   parserName.value = (val.parser || {}).name || val.schema || ''
   processId.value = (val.process || {}).id || ''
   context.value = null
   ctxError.value = ''
-  models.value = []
-  currentFile.value = ''
-  code.value = ''
-  codeDirty.value = false
-  fileNotice.value = ''
-  fileError.value = ''
-  newFilePath.value = null
-  pendingFile.value = ''
-  loadContext(val.id).then(refreshContextConstants)
+  catalog.value = []
+  loadContext(val.id)
 }
 
 watch(
@@ -440,22 +440,9 @@ watch(
   { immediate: true }
 )
 
-watch(
-  () => props.files,
-  (list) => {
-    fileList.value = list || []
-    if (currentFile.value && !fileList.value.includes(currentFile.value)) {
-      currentFile.value = ''
-      code.value = ''
-      codeDirty.value = false
-    }
-  }
-)
-
 onMounted(() => {
   loadParserMeta()
   loadFallbackVersions()
-  refreshFiles()
 })
 </script>
 
@@ -502,8 +489,8 @@ onMounted(() => {
         </span>
       </div>
       <div class="info">
-        <span class="info-label">常数版本 / PN</span>
-        <span class="info-value mono">{{ constantVersion || '—' }} / {{ constantPn || '—' }}</span>
+        <span class="info-label">常数绑定</span>
+        <span class="info-value mono" :title="bindingSummary">{{ bindingSummary }}</span>
       </div>
     </div>
 
@@ -559,97 +546,53 @@ onMounted(() => {
     </div>
 
     <h3>机器常数</h3>
-    <div class="meta two">
-      <label>常数版本
-        <select v-model="constantVersion" @change="syncConstantModel">
+    <div class="bind-head">
+      <span class="hint">
+        每行一个「版本 + PN + 模型」绑定，可增删；保存写入 constant_bindings（首行同步 constant_model）
+      </span>
+      <button class="mini" @click="addBinding">＋ 添加绑定</button>
+    </div>
+
+    <div v-if="!bindings.length" class="binding-empty">
+      <span class="muted">当前不关联机器常数</span>
+      <button class="mini" @click="addBinding">＋ 添加绑定</button>
+    </div>
+
+    <div v-for="(row, i) in bindings" :key="i" class="binding-row">
+      <span class="row-no mono">{{ i + 1 }}</span>
+      <label class="cell">
+        <select v-model="row.version" @change="onBindingVersion(i)">
           <option value="">（不关联）</option>
-          <option v-for="v in versionList" :key="v.version" :value="v.version">{{ v.version }}</option>
+          <option v-for="v in versionList" :key="v.version" :value="v.version">
+            {{ v.version }}{{ v.stale ? '（已不在版本表）' : '' }}
+          </option>
         </select>
       </label>
-      <label>PN
-        <input v-model="constantPn" list="editor-pn" placeholder="PN-DEMO-1" @change="syncConstantModel" />
-        <datalist id="editor-pn">
-          <option v-if="context && context.constants && context.constants.pn" :value="context.constants.pn" />
-        </datalist>
+      <label class="cell">
+        <select v-model="row.pn" :disabled="!row.version" @change="onBindingPn(i)">
+          <option value="">（未选 PN）</option>
+          <option v-for="pn in rowPnOptions(i)" :key="pn" :value="pn">{{ pn }}</option>
+          <option v-if="row.pn && !rowPnOptions(i).includes(row.pn)" :value="row.pn">{{ row.pn }}</option>
+        </select>
       </label>
+      <div class="cell models-cell">
+        <div v-if="rowModelOptions(i).length" class="models">
+          <label v-for="m in rowModelOptions(i)" :key="modelKey(m)" class="check">
+            <input
+              type="checkbox"
+              :checked="row.models.includes(modelKey(m))"
+              @change="toggleBindingModel(i, modelKey(m))"
+            />
+            {{ m.name || modelKey(m) }}
+          </label>
+        </div>
+        <span v-else class="hint">{{ row.version ? '选 PN 后列出模型' : '先选版本' }}</span>
+      </div>
+      <button class="tool danger row-del" title="删除这一行" @click="removeBinding(i)">✕</button>
     </div>
-    <div v-if="models.length" class="models">
-      <label v-for="m in models" :key="modelKey(m)" class="check">
-        <input
-          type="checkbox"
-          :checked="((draft.constant_model || {}).models || []).includes(modelKey(m))"
-          @change="toggleModel(modelKey(m))"
-        />
-        {{ m.name || modelKey(m) }}
-      </label>
-    </div>
-    <div v-else class="muted">选择版本与 PN 后列出可选模型</div>
 
     <h3>用例代码</h3>
-    <div class="code-panel">
-      <aside class="file-list">
-        <div class="file-head">
-          <span>文件（.py / .md）</span>
-          <button class="mini" @click="startNewFile">＋ 新建文件</button>
-        </div>
-
-        <div v-if="newFilePath !== null" class="new-file">
-          <input v-model="newFilePath" placeholder="testcase/new_case.py" @keydown.enter.prevent="createFile" />
-          <div class="row">
-            <button class="mini primary" @click="createFile">创建</button>
-            <button class="mini" @click="newFilePath = null">取消</button>
-          </div>
-        </div>
-
-        <button
-          v-for="f in codeFiles"
-          :key="f"
-          class="file-item"
-          :class="{ on: f === currentFile }"
-          @click="pickFile(f)"
-        >
-          <span class="mono">{{ f }}</span>
-        </button>
-        <div v-if="!codeFiles.length" class="muted file-empty">暂无 .py / .md 文件</div>
-      </aside>
-
-      <div class="editor">
-        <div class="editor-bar">
-          <span class="mono file-path">{{ currentFile || '未选择文件' }}</span>
-          <span v-if="codeDirty" class="tag red">未保存</span>
-          <button class="primary" :disabled="!currentFile || savingFile || loadingFile" @click="saveFile">
-            {{ savingFile ? '保存中…' : '保存文件' }}
-          </button>
-        </div>
-
-        <div v-if="pendingFile" class="switch-warn">
-          当前文件有未保存修改，切换到 {{ pendingFile }} 将丢失修改
-          <button class="mini" @click="discardAndSwitch">仍然切换</button>
-          <button class="mini" @click="pendingFile = ''">取消</button>
-        </div>
-
-        <div v-if="fileError" class="error">{{ fileError }}</div>
-        <div v-if="fileNotice" class="ok">{{ fileNotice }}</div>
-
-        <div v-if="currentFile" class="editor-body">
-          <div ref="gutter" class="gutter">
-            <div v-for="n in lineCount" :key="n">{{ n }}</div>
-          </div>
-          <textarea
-            v-model="code"
-            class="code"
-            wrap="off"
-            spellcheck="false"
-            @input="codeDirty = true"
-            @scroll="syncScroll"
-            @keydown.tab.prevent="insertTab"
-          ></textarea>
-        </div>
-        <div v-else class="muted editor-empty">
-          左侧选择文件后在此编辑；编辑器为纯 textarea + 行号列，Tab 插入 4 个空格。
-        </div>
-      </div>
-    </div>
+    <CodeWorkspace :tps-id="draft.id" @saved="onCodeSaved" />
 
     <h3>部署条目</h3>
     <table>
@@ -843,37 +786,13 @@ label {
   font-size: 12px;
 }
 
-/* ---------------- 代码编辑器 ---------------- */
-.code-panel {
-  display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
-  gap: 12px;
-  align-items: stretch;
-}
-
-.file-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px;
-  background: var(--panel-2);
-  min-height: 240px;
-  max-height: 460px;
-  overflow: auto;
-}
-
-.file-head {
+/* ---------------- 机器常数（多行绑定） ---------------- */
+.bind-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--muted);
-  font-weight: 700;
-  letter-spacing: 0.4px;
-  margin-bottom: 4px;
+  gap: 12px;
+  margin-bottom: 8px;
 }
 
 .mini {
@@ -882,126 +801,68 @@ label {
   border-radius: 5px;
 }
 
-.file-item {
-  justify-content: flex-start;
-  padding: 5px 8px;
-  font-size: 12px;
-  border-color: transparent;
-  background: transparent;
-  text-align: left;
-  word-break: break-all;
-}
-
-.file-item.on {
-  background: rgba(var(--accent-rgb), 0.1);
-  border-color: rgba(var(--accent-rgb), 0.3);
-  color: var(--accent);
-}
-
-.file-empty {
-  padding: 6px 4px;
-}
-
-.new-file {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  margin-bottom: 6px;
-  background: #fff;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-}
-
-.new-file input {
-  font-family: var(--mono);
-  font-size: 12px;
-  padding: 5px 7px;
-}
-
-.editor {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.editor-bar {
+.binding-empty {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-.file-path {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted);
-}
-
-.editor-body {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  overflow: hidden;
-  background: #fdfcff;
-}
-
-.gutter {
-  padding: 10px 8px 10px 10px;
-  overflow: hidden;
-  text-align: right;
-  background: var(--panel-2);
-  border-right: 1px solid var(--border);
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 12.5px;
-  line-height: 21px;
-  user-select: none;
-  min-width: 44px;
-}
-
-.code {
-  border: 0;
-  border-radius: 0;
-  padding: 10px 12px;
-  min-height: 360px;
-  height: 360px;
-  resize: none;
-  font-family: var(--mono);
-  font-size: 12.5px;
-  line-height: 21px;
-  white-space: pre;
-  overflow: auto;
-  background: transparent;
-  tab-size: 4;
-}
-
-.code:focus {
-  box-shadow: none;
-  border: 0;
-}
-
-.editor-empty {
-  padding: 14px;
+  padding: 9px 11px;
   border: 1px dashed var(--border-strong);
   border-radius: 8px;
 }
 
-.switch-warn {
-  display: flex;
-  align-items: center;
+.binding-row {
+  display: grid;
+  grid-template-columns: 20px 150px 170px minmax(0, 1fr) 22px;
   gap: 8px;
-  flex-wrap: wrap;
+  align-items: center;
+  padding: 7px 9px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.binding-row:hover {
+  border-color: var(--border-strong);
+}
+
+.row-no {
+  color: var(--muted);
+  text-align: right;
+}
+
+.cell {
+  min-width: 0;
+}
+
+.cell select {
+  padding: 5px 7px;
+  font-size: 12.5px;
+}
+
+.models-cell .models {
+  margin-top: 0;
+  gap: 4px 12px;
+}
+
+.models-cell .check {
   font-size: 12px;
-  color: var(--warn);
-  background: #fff8ed;
-  border: 1px solid #f3d9b0;
-  padding: 7px 10px;
-  border-radius: 7px;
+}
+
+.tool {
+  padding: 0 4px;
+  min-width: 20px;
+  height: 20px;
+  font-size: 11px;
+  border-radius: 4px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.tool.danger:hover:not(:disabled) {
+  color: var(--err);
 }
 
 .raw {

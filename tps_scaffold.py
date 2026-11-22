@@ -122,8 +122,57 @@ def _constant_models(version: str, pn: str = "") -> list[dict]:
         return []
 
 
-def constants_view(binding: Optional[dict] = None) -> dict:
-    binding = binding if isinstance(binding, dict) else {}
+def _as_bindings(value: Any) -> list[dict]:
+    """把绑定入参统一成列表：兼容旧的单行对象（constant_model）。"""
+    if isinstance(value, dict):
+        return [value] if value else []
+    if isinstance(value, list):
+        return [b for b in value if isinstance(b, dict)]
+    return []
+
+
+def _constant_view(binding: dict) -> dict:
+    """单行绑定视图：模型明细 / 可解析到的模型 / 缺失的 model_key。"""
+    version = str(binding.get("version") or "").strip()
+    pn = str(binding.get("pn") or "").strip()
+    wanted = [str(m).strip() for m in (binding.get("models") or []) if str(m).strip()]
+    rows = [
+        {"model_key": m.get("model_key", ""), "name": m.get("name", "")}
+        for m in _constant_models(version, pn)
+    ]
+    by_key = {r["model_key"]: r for r in rows}
+    if wanted:
+        resolved = [by_key[k] for k in wanted if k in by_key]
+        missing = [k for k in wanted if k not in by_key]
+    else:
+        # 未点名模型：视为整 PN 下的模型全部绑定
+        resolved = list(rows)
+        missing = []
+    return {
+        "version": version,
+        "pn": pn,
+        "models": rows,
+        "resolved": resolved,
+        "missing": missing,
+    }
+
+
+def _constant_catalog(versions: list[str]) -> list[dict]:
+    """下拉用目录：按版本 / PN 分组的模型清单（只做展示的精简字段）。"""
+    out: list[dict] = []
+    for version in versions:
+        pns: dict[str, dict] = {}
+        for m in _constant_models(version):
+            row_pn = str(m.get("pn") or "")
+            slot = pns.setdefault(row_pn, {"pn": row_pn, "models": []})
+            slot["models"].append({"model_key": m.get("model_key", ""), "name": m.get("name", "")})
+        if pns:
+            out.append({"version": version, "pns": [pns[k] for k in sorted(pns)]})
+    return out
+
+
+def constants_view(bindings: Any = None) -> dict:
+    """编辑器常数视图：绑定多行明细 + 下拉目录。入参兼容单行对象。"""
     versions: list[str] = []
     active = ""
     try:
@@ -132,22 +181,22 @@ def constants_view(binding: Optional[dict] = None) -> dict:
         info = constants.list_versions()
         versions = [v.get("version", "") for v in info.get("versions") or [] if v.get("version")]
         active = info.get("active") or ""
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - 常数库缺失时降级为空视图
         pass
 
-    pn = str(binding.get("pn") or "").strip()
-    version = str(binding.get("version") or "").strip()
-    models = _constant_models(version or active, pn)
+    rows = _as_bindings(bindings)
     return {
         "active": active,
         "versions": versions,
-        "pn": pn,
-        "models": models,
+        "bindings": [_constant_view(b) for b in rows],
+        "catalog": _constant_catalog(versions),
     }
 
 
 def context(tps: dict) -> dict:
     """编辑器上下文：preset/bom 仅在清单存了 preset_id 时返回。"""
+    import tps_store
+
     preset = find_preset(str(tps.get("preset_id") or "")) if tps.get("preset_id") else None
     bom = _bom_view(preset.get("bom") or []) if preset else []
     return {
@@ -160,7 +209,7 @@ def context(tps: dict) -> dict:
             for p in processes.list_processes()
         ],
         "parsers": [{"name": p["name"], "label": p["label"], "default": p["default"]} for p in PARSERS],
-        "constants": constants_view(tps.get("constant_model")),
+        "constants": constants_view(tps_store.constant_bindings(tps)),
     }
 
 
@@ -239,6 +288,7 @@ def scaffold(
     constant_version: str = "",
     pn: str = "",
     models: Optional[list[str]] = None,
+    bindings: Optional[list[dict]] = None,
     device_aliases: Optional[list[str]] = None,
     parser: str = DEFAULT_PARSER,
     save: bool = False,
@@ -322,11 +372,22 @@ def scaffold(
             "name": process.get("name", ""),
         }
 
-    model_keys = [str(m).strip() for m in (models or []) if str(m).strip()]
-    version = str(constant_version or "").strip()
-    pn_value = str(pn or "").strip()
-    if version and pn_value and model_keys:
-        manifest["constant_model"] = {"version": version, "pn": pn_value, "models": model_keys}
+    # 常数绑定：bindings（多行）优先，其次旧的 constant_version/pn/models 单行
+    rows: list[dict] = []
+    for item in _as_bindings(bindings):
+        row = tps_store._norm_binding(item)
+        if row["version"] and row["pn"] and row["models"]:
+            rows.append(row)
+    if not rows:
+        model_keys = [str(m).strip() for m in (models or []) if str(m).strip()]
+        version = str(constant_version or "").strip()
+        pn_value = str(pn or "").strip()
+        if version and pn_value and model_keys:
+            rows = [{"version": version, "pn": pn_value, "models": model_keys}]
+    if rows:
+        # constant_model 同步为第一行，保证 Runner 旧读法仍可用
+        manifest["constant_bindings"] = rows
+        manifest["constant_model"] = dict(rows[0])
 
     # 生成即校验：save=false 时也提前暴露 id / device_config / 用例引用问题
     if not save:
