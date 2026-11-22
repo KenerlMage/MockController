@@ -105,7 +105,7 @@ npx playwright show-trace test-results\<用例目录>\trace.zip
 
 | 文件 | testid |
 | --- | --- |
-| `App.vue` | `service-status`、`nav-tps` / `nav-packages` / `nav-metadata` / `nav-processes` / `nav-constants`、`page-title` |
+| `App.vue` | `service-status`、`nav-software` / `nav-packages` / `nav-metadata`、`nav-software-tps` / `nav-equipment` / `nav-constants` / `nav-processes`、`page-title` |
 | `views/TpsView.vue` | `tps-view`、`tps-search`、`tps-count`、`tps-tree`、`tree-expand-all`、`tree-collapse-all`、`tree-product`、`tree-subsystem`、`tree-type`、`tree-tps`、`create-tps`、`preset-picker`、`preset-picker-select`、`preset-picker-next` |
 | `views/TpsEditor.vue` | `tps-editor`、`tps-save`、`tps-save-bottom`、`step-tab-setup` / `step-tab-cmd_suit` / `step-tab-teardown`、`step-add`、`step-add-empty`、`step-row`、`step-id`、`step-type`、`step-sop-edit`、`step-sop-notice` |
 | `components/SopEditorDialog.vue` | `sop-dialog`、`sop-markdown`、`sop-save` |

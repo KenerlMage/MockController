@@ -1,21 +1,26 @@
-﻿import { test, expect } from '@playwright/test'
+import { test, expect } from '@playwright/test'
 import { gotoApp } from './fixtures.js'
 
-// 一级菜单两项 + 元数据下三个二级项（SR01-AR08）
+/**
+ * 01 控制台外壳：一级菜单 + 两个二级目录组
+ * TPS 已从一级导航移入「装备软件 → TPS 管理」。
+ */
 const TOP_TABS = [
-  ['tps', 'TPS 管理'],
+  ['software', '装备软件'],
   ['packages', '软件包'],
   ['metadata', '元数据']
 ]
 
-const SUB_TABS = [
-  ['equipment', '装备树'],
-  ['constants', '机器常数'],
-  ['processes', '工序']
+const SOFTWARE_SUBS = [
+  ['software-all', '全部软件'],
+  ['software-assistant', '装备助手'],
+  ['software-driver', '驱动软件'],
+  ['software-tps', 'TPS 管理'],
+  ['software-thirdparty', '三方软件']
 ]
 
 test.describe('01 控制台外壳', () => {
-  test('五项菜单可见，服务状态显示已连接', async ({ page }) => {
+  test('一级菜单与装备软件二级目录可见，服务状态已连接', async ({ page }) => {
     await gotoApp(page)
 
     for (const [id, name] of TOP_TABS) {
@@ -24,10 +29,9 @@ test.describe('01 控制台外壳', () => {
       await expect(item).toContainText(name)
     }
 
-    // 元数据展开后三个二级项都在
-    const sub = page.getByTestId('subnav-metadata')
+    const sub = page.getByTestId('subnav-software')
     await expect(sub).toBeVisible()
-    for (const [id, name] of SUB_TABS) {
+    for (const [id, name] of SOFTWARE_SUBS) {
       await expect(sub.getByTestId(`nav-${id}`)).toContainText(name)
     }
 
@@ -36,21 +40,23 @@ test.describe('01 控制台外壳', () => {
     await expect(status).toContainText('API v1')
   })
 
-  test('点击各菜单切换标题与选中态', async ({ page }) => {
+  test('点击菜单切换标题与选中态；TPS 在装备软件下', async ({ page }) => {
     await gotoApp(page)
 
-    for (const [id, name] of TOP_TABS.filter(([id]) => id !== 'metadata')) {
-      await page.getByTestId(`nav-${id}`).click()
-      await expect(page.getByTestId('page-title')).toHaveText(name)
-      await expect(page.getByTestId(`nav-${id}`)).toHaveClass(/active/)
-    }
+    await page.getByTestId('nav-packages').click()
+    await expect(page.getByTestId('page-title')).toHaveText('软件包')
+    await expect(page.getByTestId('nav-packages')).toHaveClass(/active/)
 
-    for (const [id, name] of SUB_TABS) {
-      await page.getByTestId(`nav-${id}`).click()
-      await expect(page.getByTestId('page-title')).toHaveText(name)
-      await expect(page.getByTestId(`nav-${id}`)).toHaveClass(/active/)
-      // 一级「元数据」保持高亮
-      await expect(page.getByTestId('nav-metadata')).toHaveClass(/active/)
-    }
+    await page.getByTestId('nav-software-tps').click()
+    await expect(page.getByTestId('page-title')).toHaveText('TPS 管理')
+    await expect(page.getByTestId('nav-software-tps')).toHaveClass(/active/)
+    // 一级「装备软件」保持高亮
+    await expect(page.getByTestId('nav-software')).toHaveClass(/active/)
+    // TPS 清单确实挂载
+    await expect(page.getByTestId('page-title')).toContainText('TPS')
+
+    await page.getByTestId('nav-equipment').click()
+    await expect(page.getByTestId('page-title')).toHaveText('装备树')
+    await expect(page.getByTestId('nav-metadata')).toHaveClass(/active/)
   })
 })

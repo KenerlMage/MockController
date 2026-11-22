@@ -15,7 +15,6 @@ const error = ref('')
 // 左侧导航：与 Runner 一致的「图标 + 名称 + 说明 + 代号」三段式。
 // 元数据为一级菜单，下挂三个二级项（装备树 / 机器常数 / 工序），见 SR01-AR08。
 const tabs = [
-  { id: 'tps', icon: '▤', name: 'TPS 管理', desc: '清单 · 部署 · 常数绑定', code: 'TPS' },
   { id: 'packages', icon: '▣', name: '软件包', desc: '归档 · 版本 · 探测', code: 'PKG' },
   {
     id: 'software',
@@ -27,7 +26,7 @@ const tabs = [
       { id: 'software', testId: 'software-all', icon: '▣', name: '全部软件', desc: '归档与清单', code: 'ALL' },
       { id: 'software-assistant', icon: '⚒', name: '装备助手', desc: '装调类 · 独立部署', code: 'AST' },
       { id: 'software-driver', icon: '⚙', name: '驱动软件', desc: 'TPS 运行依赖', code: 'DRV' },
-      { id: 'software-tps', icon: '▤', name: 'TPS', desc: '测试用例集', code: 'TPS' },
+      { id: 'software-tps', icon: '▤', name: 'TPS 管理', desc: '清单 · 部署 · 常数绑定', code: 'TPS' },
       { id: 'software-thirdparty', icon: '▣', name: '三方软件', desc: '第三方依赖', code: '3RD' }
     ]
   },
@@ -71,12 +70,21 @@ const current = computed(() => {
   return tabs[0]
 })
 
-const expanded = ref(true)  // 二级菜单默认展开，避免元数据入口看起来是空的
+const expandedGroups = ref(new Set(['software', 'metadata']))
+
+const isExpanded = (id) => expandedGroups.value.has(id)
+
+function setExpanded(id, open) {
+  const next = new Set(expandedGroups.value)
+  if (open) next.add(id)
+  else next.delete(id)
+  expandedGroups.value = next
+}
 
 function pick(t) {
   if (Array.isArray(t.children)) {
     // 点一级一律展开并进入第一个二级项；收起由二级项的切换代替，避免"点了没反应"
-    expanded.value = true
+    setExpanded(t.id, true)
     const childIds = t.id === 'software' ? SOFTWARE_CHILD_IDS : METADATA_CHILD_IDS
     if (!childIds.includes(store.tab)) store.switchTab(t.children[0].id)
     return
@@ -137,7 +145,7 @@ onMounted(async () => {
             <span class="side-body">
               <span class="side-name">
                 {{ t.name }}
-                <span v-if="t.children" class="side-caret">{{ expanded ? '▾' : '▸' }}</span>
+                <span v-if="t.children" class="side-caret">{{ isExpanded(t.id) ? '▾' : '▸' }}</span>
               </span>
               <span class="side-desc">{{ t.desc }}</span>
             </span>
@@ -145,7 +153,7 @@ onMounted(async () => {
           </button>
 
           <!-- 二级菜单：元数据下挂 装备树 / 机器常数 / 工序 -->
-          <div v-if="t.children && expanded" class="side-sub" :data-testid="`subnav-${t.id}`">
+          <div v-if="t.children && isExpanded(t.id)" class="side-sub" :data-testid="`subnav-${t.id}`">
             <button
               v-for="c in t.children"
               :key="c.id"
@@ -178,7 +186,7 @@ onMounted(async () => {
 
       <div v-if="error" class="error">{{ error }}</div>
 
-      <TpsView v-if="store.tab === 'tps'" />
+      <TpsView v-if="store.tab === 'software-tps'" />
       <PackagesView v-else-if="store.tab === 'packages'" />
       <MetadataView v-else-if="store.tab === 'metadata'" />
       <ProcessesView v-else-if="store.tab === 'processes'" />

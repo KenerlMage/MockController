@@ -72,7 +72,7 @@ function driverZipBase64() {
 }
 
 test.describe('09 装备软件归档', () => {
-  test('一级导航含四个二级目录', async ({ page }) => {
+  test('一级导航含五个二级目录', async ({ page }) => {
     await gotoApp(page)
     const nav = page.getByTestId('nav-software')
     await expect(nav).toBeVisible()
@@ -80,6 +80,7 @@ test.describe('09 装备软件归档', () => {
     const sub = page.getByTestId('subnav-software')
     await expect(sub).toBeVisible()
     for (const [id, name] of [
+      ['software-all', '全部软件'],
       ['software-assistant', '装备助手'],
       ['software-driver', '驱动软件'],
       ['software-tps', 'TPS'],
