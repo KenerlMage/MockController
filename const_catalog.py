@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """机器常数目录层：模型清单 / 版本历史 / TPS 复数关联 / 标定徽标 / 元数据二级菜单 / 字段映射
 
 覆盖需求：
@@ -841,6 +841,17 @@ def set_tps_constants(
             }
             for row in rows
         ]
+        # 同时写 Runner 侧读取的字段，保证"界面保存"与"Runner 解析"看到同一份关联
+        raw["machine_constant_bindings"] = [
+            {
+                "pn": row["pn"],
+                "model_key": row["model_key"],
+                "alias": row["alias"],
+                "source": row["source"],
+                **({"version": row["version"]} if row["version"] else {}),
+            }
+            for row in rows
+        ]
         first = rows[0]
         raw["constant_model"] = {
             "version": first["version"],
@@ -849,6 +860,7 @@ def set_tps_constants(
         }
     else:
         raw.pop("constant_bindings", None)
+        raw.pop("machine_constant_bindings", None)
         raw.pop("constant_model", None)
     raw["updated_at"] = _now()
     with _LOCK:
@@ -989,9 +1001,14 @@ def set_field_mapping(payload: dict, db_path: Optional[Path] = None) -> dict:
 
 
 def apply_field_mapping(
-    pn: str, model_key: str, rows: Any, db_path: Optional[Path] = None
+    pn: str, model_key: str, rows: Any, db_path: Optional[Path] = None, reverse: bool = False
 ) -> dict:
-    """按下位机返回值换算：target = value * scale + offset。"""
+    """字段换算。
+
+    - ``reverse=False``（默认，取数方向）：``target = source * scale + offset``；
+    - ``reverse=True``（回传方向）：``source = (target - offset) / scale``，
+      即 SR02-AR09 要求的「单位换算可逆，回传时按原口径还原」。
+    """
     mapping = get_field_mapping(pn, model_key, db_path=db_path)
     mappings = mapping["mappings"]
     if not mappings:
@@ -1024,7 +1041,13 @@ def apply_field_mapping(
         except (TypeError, ValueError) as exc:
             raise ValueError(f"字段 {source_field} 的值不是数值：{raw_value!r}") from exc
         rule = by_source[source_field]
-        values[rule["target_field"]] = round(number * rule["scale"] + rule["offset"], 10)
+        if reverse:
+            scale = float(rule["scale"] or 0.0)
+            if scale == 0:
+                raise ValueError(f"字段 {source_field} 的 scale 为 0，无法反向换算")
+            values[rule["target_field"]] = round((number - rule["offset"]) / scale, 10)
+        else:
+            values[rule["target_field"]] = round(number * rule["scale"] + rule["offset"], 10)
         received.add(source_field)
 
     if unknown:
@@ -1045,6 +1068,7 @@ def apply_field_mapping(
         "pn": mapping["pn"],
         "model_key": mapping["model_key"],
         "count": len(values),
+        "reverse": bool(reverse),
         "values": values,
         **flat,
     }
@@ -1203,7 +1227,8 @@ def register_routes(app, base_dir: Path, db_path: Optional[Path] = None) -> None
             if not isinstance(data, dict):
                 raise ValueError("请求体必须是 {pn, model_key, rows: [...]}")
             return apply_field_mapping(
-                data.get("pn"), data.get("model_key"), data.get("rows"), db_path=db_file
+                data.get("pn"), data.get("model_key"), data.get("rows"),
+                db_path=db_file, reverse=_as_bool(data.get("reverse"), default=False),
             )
         except ValueError as exc:
             return {**_fail(exc), "values": {}}
