@@ -22,3 +22,4 @@ D:\ATE\MockRunner\docs\需求设计\
 | [机器常数实现契约.md](机器常数实现契约.md) | 并行实现的接口、表结构、验收口径 |
 | [机器常数实现说明.md](机器常数实现说明.md) | 落地状态、实测数据、未覆盖范围、委派核验 |
 | [软件部署功能.md](软件部署功能.md) | SR01 Controller 归档与部署编排、SR02 Runner 三类部署、SR03 Controller Python 依赖供给、SR04 Runner 依赖环境执行，共 30 个 AR |
+| [Python三方依赖管理（Controller）.md](Python三方依赖管理（Controller）.md) | SR01 Controller 备案目录、制品仓、依赖解析与锁生成，共 10 个 AR |
